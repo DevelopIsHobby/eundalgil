@@ -1,0 +1,23 @@
+# 의존성
+/node_modules
+
+# 빌드 산출물
+/.next/
+/out/
+/build
+
+# 환경 변수 (키가 들어가므로 절대 커밋하지 않는다)
+.env
+.env.local
+.env*.local
+
+# 타입스크립트
+*.tsbuildinfo
+next-env.d.ts
+
+# 에디터 / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

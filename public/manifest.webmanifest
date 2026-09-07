@@ -1,0 +1,13 @@
+{
+  "name": "응달길 — 그늘만 밟고 가는 길",
+  "short_name": "응달길",
+  "description": "햇빛과 그늘을 계산해 걷기 좋은 길을 찾아주는 보행 지도",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#EDF0F3",
+  "theme_color": "#0FA958",
+  "lang": "ko",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

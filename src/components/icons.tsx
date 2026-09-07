@@ -1,0 +1,159 @@
+import type { SVGProps } from "react";
+
+type P = SVGProps<SVGSVGElement>;
+const base = (p: P) => ({
+  width: 20,
+  height: 20,
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.8,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+  ...p,
+});
+
+export const IconSearch = (p: P) => (
+  <svg {...base(p)}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="m20 20-3.5-3.5" />
+  </svg>
+);
+
+export const IconMic = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+  </svg>
+);
+
+export const IconMenu = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M4 7h16M4 12h16M4 17h16" />
+  </svg>
+);
+
+export const IconBack = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M15 5l-7 7 7 7" />
+  </svg>
+);
+
+export const IconClose = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M6 6l12 12M18 6 6 18" />
+  </svg>
+);
+
+export const IconLocate = (p: P) => (
+  <svg {...base(p)}>
+    <circle cx="12" cy="12" r="3.5" />
+    <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+    <circle cx="12" cy="12" r="8" opacity="0.45" />
+  </svg>
+);
+
+export const IconLayers = (p: P) => (
+  <svg {...base(p)}>
+    <path d="m12 3 8 4.5-8 4.5-8-4.5L12 3Z" />
+    <path d="m4 12.5 8 4.5 8-4.5" />
+  </svg>
+);
+
+export const IconSwap = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M7 4v13m0 0-3-3m3 3 3-3" />
+    <path d="M17 20V7m0 0-3 3m3-3 3 3" />
+  </svg>
+);
+
+export const IconWalk = (p: P) => (
+  <svg {...base(p)}>
+    <circle cx="13" cy="4" r="1.7" />
+    <path d="M11 21l1.5-5.5L10 13V9l4-1 2.5 3.5 2.5 1" />
+    <path d="M10 13 7 16l-1 5" />
+  </svg>
+);
+
+export const IconBus = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="4" y="3" width="16" height="14" rx="3" />
+    <path d="M4 11h16M8 21v-2M16 21v-2" />
+    <circle cx="8.5" cy="14.5" r="0.9" fill="currentColor" stroke="none" />
+    <circle cx="15.5" cy="14.5" r="0.9" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+export const IconClock = (p: P) => (
+  <svg {...base(p)}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7v5l3 2" />
+  </svg>
+);
+
+export const IconSun = (p: P) => (
+  <svg {...base(p)}>
+    <circle cx="12" cy="12" r="4" />
+    <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
+  </svg>
+);
+
+export const IconMoon = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z" />
+  </svg>
+);
+
+export const IconTree = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M12 3 6.5 11h3L5 17h14l-4.5-6h3L12 3Z" />
+    <path d="M12 17v4" />
+  </svg>
+);
+
+export const IconStairs = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M3 20h5v-4h5v-4h5V8h3" />
+  </svg>
+);
+
+export const IconHome = (p: P) => (
+  <svg {...base(p)}>
+    <path d="m4 11 8-7 8 7" />
+    <path d="M6 10v10h12V10" />
+  </svg>
+);
+
+export const IconBookmark = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M7 4h10v16l-5-3.5L7 20V4Z" />
+  </svg>
+);
+
+export const IconCompass = (p: P) => (
+  <svg {...base(p)}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="m15.5 8.5-2 5-5 2 2-5 5-2Z" />
+  </svg>
+);
+
+export const IconUser = (p: P) => (
+  <svg {...base(p)}>
+    <circle cx="12" cy="8" r="3.5" />
+    <path d="M5 20c1.2-3.6 4-5.5 7-5.5s5.8 1.9 7 5.5" />
+  </svg>
+);
+
+export const IconChevronRight = (p: P) => (
+  <svg {...base(p)}>
+    <path d="m9 5 7 7-7 7" />
+  </svg>
+);
+
+export const IconCctv = (p: P) => (
+  <svg {...base(p)}>
+    <path d="m3 8 13-4 2 5-13 4L3 8Z" />
+    <path d="M7 13v3a3 3 0 0 0 3 3h6" />
+    <path d="M18 9l3-1" />
+  </svg>
+);
