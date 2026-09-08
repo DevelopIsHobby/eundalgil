@@ -4,10 +4,11 @@ export type WalkWay = {
   id: string;
   path: LngLat[];
   /**
-   * ramp  = 차량 연결로. 걸을 수는 있어도 보행자가 갈 길은 아니다
-   * trail = 포장 안 된 산길·오솔길. 지름길로 보이지만 실제로 걸어 다니는 길이 아닌 경우가 많다
+   * ramp   = 차량 연결로. 걸을 수는 있어도 보행자가 갈 길은 아니다
+   * trail  = 포장 안 된 산길·오솔길. 지름길로 보이지만 실제로 걸어 다니는 길이 아닌 경우가 많다
+   * tunnel = 차도 터널의 보도. 걸을 수는 있지만 시끄럽고 매연이 있어 마지막에 고른다
    */
-  kind: "footway" | "steps" | "crossing" | "road" | "park" | "ramp" | "trail";
+  kind: "footway" | "steps" | "crossing" | "road" | "park" | "ramp" | "trail" | "tunnel";
   /** 경사 태그 원본 (예: "10%", "up") */
   incline?: string;
   name?: string;

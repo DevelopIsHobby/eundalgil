@@ -69,20 +69,23 @@ function isMajor(tags: Record<string, string>) {
   return MAJOR_HIGHWAY.has(tags.highway ?? "") || Number(tags.lanes ?? 0) >= 6;
 }
 
+/**
+ * 차도 터널의 보도인지.
+ *
+ * 처음에는 차도 터널을 통째로 뺐다. 언덕을 뚫은 터널은 거리로만 보면 가장 곧은 길이라
+ * 경로가 그리로 빨려 들어가기 때문이다. 그런데 상도터널처럼 **실제로 사람이 걸어 다니는**
+ * 터널까지 막으니, 상도동 ↔ 흑석동이 통째로 끊겨 산을 넘는 2.2km 경로가 나왔다.
+ * 그래서 빼는 대신 따로 표시해 두고, 비용에서 크게 눌러 마지막에 고르게 한다.
+ * `foot=no` 로 걷기를 금지한 터널만 뺀다.
+ */
+function isRoadTunnel(tags: Record<string, string>) {
+  const inTunnel = tags.tunnel && tags.tunnel !== "no";
+  return !!inTunnel && MOTOR_ROAD.test(tags.highway ?? "");
+}
+
 function walkable(tags: Record<string, string>) {
   if (tags.foot === "no" || tags.access === "private" || tags.access === "no") return false;
   if (tags.indoor === "yes") return false;
-
-  /*
-   * 차도 터널은 걸어 들어가는 길이 아니다.
-   * 상도동 양녕로처럼 언덕을 뚫은 터널이 있으면, 거리로만 보면 가장 곧은 길이라
-   * 경로가 그리로 빨려 들어간다. 실제로는 아무도 그렇게 걷지 않는다.
-   * 보행자용 지하도(footway·steps·path 에 붙은 tunnel)는 그대로 쓴다.
-   */
-  const inTunnel = tags.tunnel && tags.tunnel !== "no";
-  if (inTunnel && MOTOR_ROAD.test(tags.highway ?? "") && tags.foot !== "yes" && !tags.sidewalk) {
-    return false;
-  }
   return true;
 }
 
@@ -157,11 +160,14 @@ export async function GET(req: NextRequest) {
         ways.push({
           id: `w${el.id}`,
           path,
-          kind: wayKind(tags, inWood(path[Math.floor(path.length / 2)])),
+          kind: isRoadTunnel(tags)
+            ? "tunnel"
+            : wayKind(tags, inWood(path[Math.floor(path.length / 2)])),
           incline: tags.incline,
           major: isMajor(tags),
           name: tags.name,
-          covered: tags.covered === "yes" || tags.tunnel === "building_passage",
+          // 터널 안은 해가 들지 않는다 (지붕·아케이드와 같은 취급)
+          covered: tags.covered === "yes" || !!(tags.tunnel && tags.tunnel !== "no"),
         });
       }
     } else if (el.type === "node" && el.lat != null && el.lon != null) {

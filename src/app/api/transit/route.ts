@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { EARTH_M_PER_DEG_LAT, mPerDegLon, type LngLat } from "@/lib/geo";
 import type { TransitData, TransitMode, TransitPattern, TransitStop } from "@/lib/transit";
 import { overpass, type OverpassElement } from "@/lib/overpass";
+import { fetchTagoBuses, hasTagoKey } from "@/lib/tago";
+import { fetchSeoulBuses, seoulKey } from "@/lib/seoulbus";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -122,11 +124,17 @@ export async function GET(req: NextRequest) {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return NextResponse.json(hit.data);
 
-  let elements: OverpassElement[];
+  /*
+   * 지하철은 OSM, 버스는 TAGO·TOPIS 에서 온다.
+   * Overpass 가 죽어도 버스 안내는 나가야 하므로 여기서 끝내지 않는다.
+   */
+  let elements: OverpassElement[] = [];
+  let osmError: string | null = null;
   try {
     elements = await overpass(buildQuery(a, b, radius));
   } catch (err) {
-    return new NextResponse((err as Error).message, { status: 503 });
+    osmError = (err as Error).message;
+    console.warn("[transit] overpass:", osmError);
   }
 
   const nodes = new Map<number, OverpassElement>();
@@ -200,13 +208,55 @@ export async function GET(req: NextRequest) {
     });
   }
 
+  /*
+   * 버스는 TAGO(국토교통부) 가 정답에 가깝다. OSM 에는 국내 시내·마을버스가 거의 없고,
+   * 있어도 정류장 순서가 옛 방식이라 못 쓰는 경우가 많다.
+   * TAGO 가 버스를 주면 OSM 버스는 통째로 버리고, 지하철만 OSM 것을 쓴다.
+   */
+  let busStops: TransitStop[] = [];
+  let busPatterns: TransitPattern[] = [];
+
+  /*
+   * 서울은 TOPIS, 그 밖은 TAGO 다.
+   * TAGO 에는 서울 시내버스가 거의 없어서(강남·사당 근처 몇 개뿐) 서울에서는 쓸 수 없고,
+   * TOPIS 는 서울 전용이다. 둘 다 시도해 나오는 쪽을 쓴다.
+   */
+  const sources: [string, () => Promise<{ stops: TransitStop[]; patterns: TransitPattern[] }>][] = [];
+  if (seoulKey()) sources.push(["seoul", () => fetchSeoulBuses(a, b, radius)]);
+  if (hasTagoKey()) sources.push(["tago", () => fetchTagoBuses(a, b, radius)]);
+
+  let busNotice: string | undefined;
+  for (const [name, run] of sources) {
+    try {
+      const got = await run();
+      if (got.patterns.length) {
+        busStops = got.stops;
+        busPatterns = got.patterns;
+        busNotice = undefined;
+        break;
+      }
+    } catch (err) {
+      // 버스를 못 받아도 지하철 안내는 그대로 나가야 한다. 이유는 화면에 전한다
+      const msg = (err as Error).message;
+      console.warn(`[transit] ${name}:`, msg);
+      busNotice ??= msg;
+    }
+  }
+  if (!sources.length) busNotice = "버스 정보 키가 없어 지하철만 안내합니다. (.env.local 의 TAGO_KEY)";
+
+  const osmPatterns = busPatterns.length ? patterns.filter((p) => p.mode !== "bus") : patterns;
+
   // 실제로 쓰이는 정류장만 남긴다
-  const used = new Set(patterns.flatMap((p) => p.stops));
+  const used = new Set(osmPatterns.flatMap((p) => p.stops));
   const data: TransitData = {
-    stops: [...stops.values()].filter((s) => used.has(s.id)),
-    patterns,
+    stops: [...[...stops.values()].filter((s) => used.has(s.id)), ...busStops],
+    patterns: [...osmPatterns, ...busPatterns],
+    notice: busPatterns.length ? undefined : busNotice,
     fetchedAt: Date.now(),
   };
+
+  // 지하철도 버스도 못 받았으면 그건 실패다
+  if (osmError && !busPatterns.length) return new NextResponse(osmError, { status: 503 });
 
   cache.set(key, { at: Date.now(), data });
   if (cache.size > CACHE_MAX) {

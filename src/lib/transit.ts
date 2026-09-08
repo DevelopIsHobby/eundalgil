@@ -33,6 +33,8 @@ export type TransitPattern = {
 export type TransitData = {
   stops: TransitStop[];
   patterns: TransitPattern[];
+  /** 버스 정보를 못 받았을 때 그 이유 (키 미신청 등) */
+  notice?: string;
   fetchedAt: number;
 };
 

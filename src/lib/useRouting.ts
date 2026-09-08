@@ -218,8 +218,8 @@ export function useRouting() {
               const hasBus = transit.patterns.some((p) => p.mode === "bus");
               notices.push(
                 hasBus
-                  ? "이 구간을 잇는 노선을 찾지 못했어요. (OpenStreetMap 에 등록된 노선 기준)"
-                  : "이 지역 버스·마을버스 노선은 OpenStreetMap 에 등록돼 있지 않아 지하철만 봅니다."
+                  ? "이 구간을 잇는 노선을 찾지 못했어요."
+                  : (transit.notice ?? "이 지역 버스 노선 정보를 받지 못해 지하철만 봅니다.")
               );
             }
             let dropped = 0;
