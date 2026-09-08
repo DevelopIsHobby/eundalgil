@@ -29,6 +29,8 @@ export type OverpassElement = {
   lon?: number;
   tags?: Record<string, string>;
   geometry?: { lat: number; lon: number }[];
+  /** 관계(relation)의 멤버 목록 — 노선의 정류장 순서를 읽는 데 쓴다 */
+  members?: { type: string; ref: number; role: string }[];
 };
 
 function host(url: string) {

@@ -157,3 +157,101 @@ export const IconCctv = (p: P) => (
     <path d="M18 9l3-1" />
   </svg>
 );
+
+export const IconSubway = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="5" y="3" width="14" height="13" rx="4" />
+    <path d="M5 10h14M9 21l1.5-2M15 21l-1.5-2" />
+    <circle cx="9" cy="13" r="0.9" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="13" r="0.9" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+export const IconLeaf = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M20 4c0 8-5 12-11 12H5c0-7 5-11 11-11h4Z" />
+    <path d="M5 20c2-4 5-6 9-8" />
+  </svg>
+);
+
+export const IconShield = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3Z" />
+  </svg>
+);
+
+export const IconHill = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M2 18h20" />
+    <path d="m4 18 5-7 3.5 4.5L16 10l4 8" />
+  </svg>
+);
+
+export const IconPeople = (p: P) => (
+  <svg {...base(p)}>
+    <circle cx="9" cy="8" r="3" />
+    <circle cx="17" cy="9" r="2.2" />
+    <path d="M3 19c1-3.2 3.4-5 6-5s5 1.8 6 5M16 14.5c2 .4 3.4 2 4 4.5" />
+  </svg>
+);
+
+export const IconDetour = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M7 21V9a3 3 0 0 1 6 0v6a3 3 0 0 0 6 0V4" />
+    <path d="m16 7 3-3 3 3" />
+  </svg>
+);
+
+export const IconSeat = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M7 4v9a2 2 0 0 0 2 2h6" />
+    <path d="M17 8v12" />
+    <path d="M7 20h9" />
+  </svg>
+);
+
+export const IconSettings = (p: P) => (
+  <svg {...base(p)}>
+    <circle cx="12" cy="12" r="3" />
+    <path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8" />
+  </svg>
+);
+
+export const IconChevronDown = (p: P) => (
+  <svg {...base(p)}>
+    <path d="m6 9 6 6 6-6" />
+  </svg>
+);
+
+export const IconTransfer = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M4 8h13m0 0-3-3m3 3-3 3" />
+    <path d="M20 16H7m0 0 3-3m-3 3 3 3" />
+  </svg>
+);
+
+export const IconFlag = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M6 21V4h12l-2.5 4L18 12H6" />
+  </svg>
+);
+
+export const IconCloud = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M7 18a4 4 0 0 1 .6-8A5 5 0 0 1 17 10a3.8 3.8 0 0 1 0 8H7Z" />
+  </svg>
+);
+
+export const IconRain = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M7 15a4 4 0 0 1 .6-8A5 5 0 0 1 17 7a3.8 3.8 0 0 1 0 8H7Z" />
+    <path d="M9 18.5 8 21M13 18.5 12 21M17 18.5 16 21" />
+  </svg>
+);
+
+export const IconSnow = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M7 15a4 4 0 0 1 .6-8A5 5 0 0 1 17 7a3.8 3.8 0 0 1 0 8H7Z" />
+    <path d="M9 19h.01M13 20h.01M17 19h.01" />
+  </svg>
+);

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { getSunState } from "@/lib/sun";
 import { ShadeIndex, buildShadows } from "@/lib/shadow";
 import { applyShade, buildGraph, findRoutes } from "@/lib/router";
+import { DEFAULT_PREFS, weightsFromPrefs, type Prefs } from "@/lib/prefs";
+import { planTransit, type TransitData } from "@/lib/transit";
 import { bboxOfPoints, padBBox, distMeters } from "@/lib/geo";
 import type { OsmBundle } from "@/lib/osm";
 import type { LngLat } from "@/lib/geo";
@@ -43,11 +45,48 @@ export async function GET(req: Request) {
   applyShade(graph, idx);
   const tGraph = Date.now();
 
-  // 화면의 설정을 그대로 재현할 수 있게 열어 둔다
-  const shadeWeight = Number(url.searchParams.get("shade") ?? 1.4);
-  const avoidSteps = url.searchParams.get("avoidSteps") === "1";
-  const r = findRoutes(graph, origin, dest, { shadeWeight, avoidSteps });
+  // 화면의 설정을 그대로 재현할 수 있게 취향을 파라미터로 열어 둔다
+  const pick = <T extends string>(name: string, fallback: T) =>
+    (url.searchParams.get(name) as T | null) ?? fallback;
+  const prefs: Prefs = {
+    ...DEFAULT_PREFS,
+    sun: pick("sun", DEFAULT_PREFS.sun),
+    hill: pick("hill", DEFAULT_PREFS.hill),
+    steps: pick("steps", DEFAULT_PREFS.steps),
+    vibe: pick("vibe", DEFAULT_PREFS.vibe),
+    detour: pick("detour", DEFAULT_PREFS.detour),
+    excludeSteps: url.searchParams.get("excludeSteps") === "1",
+  };
+  const r = findRoutes(graph, origin, dest, weightsFromPrefs(prefs, sun.isDay));
   const tRoute = Date.now();
+
+  /* 대중교통은 따로 켠다 — Overpass 를 한 번 더 부르기 때문이다 */
+  let transit: unknown = null;
+  if (url.searchParams.get("transit") === "1") {
+    const tRes = await fetch(
+      `${base}/api/transit?a=${origin.join(",")}&b=${dest.join(",")}&r=800`
+    );
+    if (tRes.ok) {
+      const data = (await tRes.json()) as TransitData;
+      const cands = planTransit(data, origin, dest, 4);
+      transit = {
+        stops: data.stops.length,
+        patterns: data.patterns.length,
+        candidates: cands.map((c) => ({
+          minutes: +(c.estimateSec / 60).toFixed(1),
+          transfers: c.rides.length - 1,
+          rides: c.rides.map(
+            (ride) =>
+              `${ride.pattern.ref || ride.pattern.name}: ${ride.from.name} → ${ride.to.name} (${ride.stopCount}개 정류장)`
+          ),
+          accessM: Math.round(c.accessMeters),
+          egressM: Math.round(c.egressMeters),
+        })),
+      };
+    } else {
+      transit = { error: await tRes.text() };
+    }
+  }
 
   return NextResponse.json({
     straightLineM: Math.round(distMeters(origin, dest)),
@@ -81,6 +120,8 @@ export async function GET(req: Request) {
       // 고도·경사를 따로 재 보려고 좌표를 성기게 실어 준다
       path: x.path.filter((_, i) => i % 5 === 0 || i === x.path.length - 1),
     })),
+    prefs,
+    transit,
     error: r.error ?? null,
     msec: { fetch: tFetch - t0, shadow: tShadow - tFetch, graph: tGraph - tShadow, route: tRoute - tGraph },
   });

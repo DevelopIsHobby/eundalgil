@@ -5,15 +5,19 @@ import dynamic from "next/dynamic";
 import MapView, { getMap } from "@/components/MapView";
 import TopBar from "@/components/TopBar";
 import MapControls from "@/components/MapControls";
-import BottomNav from "@/components/BottomNav";
 import RouteHeader from "@/components/RouteHeader";
-import RouteSheet from "@/components/RouteSheet";
+import PlanTabs from "@/components/PlanTabs";
+import PlanSheet from "@/components/PlanSheet";
 import PlaceCard from "@/components/PlaceCard";
 import SearchOverlay from "@/components/SearchOverlay";
+import Onboarding from "@/components/Onboarding";
+import PrefsSheet from "@/components/PrefsSheet";
+import WeatherCard, { useWeather } from "@/components/WeatherCard";
 import Toast from "@/components/Toast";
-import { useApp, type Place } from "@/lib/store";
+import { useActivePlan, useApp, type Place } from "@/lib/store";
 import { useRouting } from "@/lib/useRouting";
 import { MIN_DATA_ZOOM } from "@/lib/config";
+import { IconWalk } from "@/components/icons";
 
 /**
  * 시각 막대는 "지금"(Date.now)에서 출발하므로 서버에서 그린 HTML 과 어긋난다.
@@ -22,13 +26,14 @@ import { MIN_DATA_ZOOM } from "@/lib/config";
  */
 const TimeBar = dynamic(() => import("@/components/TimeBar"), {
   ssr: false,
-  loading: () => <div className="mx-3 h-[77px] rounded-xl bg-white/95 shadow-card" />,
+  loading: () => <div className="mx-3 h-[86px] rounded-[22px] bg-white/95 shadow-card" />,
 });
 
 type Editing = "origin" | "destination" | "browse" | null;
 
 export default function Page() {
   const store = useApp();
+  const plan = useActivePlan();
   const [editing, setEditing] = useState<Editing>(null);
   /** 홈에서 검색해 고른 장소 — 출발/도착을 아직 안 정한 상태 */
   const [picked, setPicked] = useState<Place | null>(null);
@@ -38,6 +43,16 @@ export default function Page() {
   const topRef = useRef<HTMLDivElement>(null);
 
   useRouting();
+  useWeather();
+
+  /* 저장해 둔 취향을 불러온다 (서버 렌더와 어긋나지 않게 마운트 뒤에) */
+  useEffect(() => {
+    useApp.getState().hydratePrefs();
+    // 지도(window.__map)와 마찬가지로, 개발 중에 콘솔에서 상태를 들여다볼 수 있게 열어 둔다
+    if (process.env.NODE_ENV === "development") {
+      (window as unknown as { __app?: typeof useApp }).__app = useApp;
+    }
+  }, []);
 
   /* 상·하단 UI 높이를 재서 지도 여백에 쓴다 */
   useLayoutEffect(() => {
@@ -65,29 +80,27 @@ export default function Page() {
   }, [origin, destination, screen]);
 
   /* 경로가 나오면 지도에 맞춰 보여준다 */
-  // 경로 id 만 이으면 늘 "fast|shade" 라서, 출발·도착을 바꿔도 값이 그대로다.
-  // 그러면 아래 효과가 다시 돌지 않아 지도가 옛 자리에 남는다. 실제 좌표를 섞는다.
-  const routeKey = [
-    store.origin?.p.join(","),
-    store.destination?.p.join(","),
-    ...store.routes.map((r) => `${r.id}:${Math.round(r.distance)}`),
+  // 좌표를 섞어야 출발·도착을 바꿨을 때도 값이 달라져 다시 맞춘다
+  const planKey = [
+    origin?.p.join(","),
+    destination?.p.join(","),
+    plan?.id,
+    plan ? Math.round(plan.seconds) : "",
   ].join("|");
   useEffect(() => {
     const map = getMap();
-    if (!map || !store.routes.length) return;
-    const all = store.routes.flatMap((r) => r.path);
-    if (all.length < 2) return;
+    if (!map || !plan || plan.path.length < 2) return;
     let minLng = Infinity,
       minLat = Infinity,
       maxLng = -Infinity,
       maxLat = -Infinity;
-    for (const [lng, lat] of all) {
+    for (const [lng, lat] of plan.path) {
       minLng = Math.min(minLng, lng);
       maxLng = Math.max(maxLng, lng);
       minLat = Math.min(minLat, lat);
       maxLat = Math.max(maxLat, lat);
     }
-    // 경로 시트가 펼쳐지며 지도 여백이 커지므로 그 값이 정해진 뒤에 맞춘다.
+    // 시트가 펼쳐지며 지도 여백이 커지므로 그 값이 정해진 뒤에 맞춘다.
     // 여백은 MapView 가 정하니 여기서는 지도에 설정된 값을 그대로 받아 쓴다 —
     // 계산에 쓴 여백과 실제 여백이 다르면 경로가 UI 뒤로 밀린다.
     const t = setTimeout(() => {
@@ -102,7 +115,7 @@ export default function Page() {
     return () => clearTimeout(t);
     // 여백이 잇달아 바뀌면 타이머가 취소·재설정되며 마지막 값으로 한 번만 맞춘다
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routeKey, topInset, bottomInset]);
+  }, [planKey, topInset, bottomInset]);
 
   /**
    * 고른 지점으로 지도를 옮긴다. 경로가 나오면 곧이어 fitBounds 가 다시 잡아 준다.
@@ -157,6 +170,7 @@ export default function Page() {
   };
 
   const zoomTooLow = store.zoom < MIN_DATA_ZOOM;
+  const sheetOpen = store.screen === "routeResult" && store.sheetExpanded;
 
   return (
     <main className="relative h-[100dvh] w-full overflow-hidden bg-[#EDF0F3]">
@@ -170,12 +184,10 @@ export default function Page() {
         {store.screen === "browse" ? (
           <TopBar onSearch={() => setEditing("browse")} />
         ) : (
-          <RouteHeader
-            onEdit={(w) => setEditing(w)}
-            onClose={() => {
-              store.reset();
-            }}
-          />
+          <>
+            <RouteHeader onEdit={(w) => setEditing(w)} onClose={() => store.reset()} />
+            {store.screen === "routeResult" && <PlanTabs />}
+          </>
         )}
 
         {(store.dataLoading || store.dataError || zoomTooLow) && (
@@ -202,11 +214,28 @@ export default function Page() {
         ref={bottomRef}
         className="pointer-events-none absolute inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[var(--app-max-w)]"
       >
-        <MapControls bottom={bottomInset + 12} />
+        {!sheetOpen && <MapControls bottom={bottomInset + 12} />}
 
-        <div className="pb-2">
-          <TimeBar />
-        </div>
+        {/* 홈에서만: 날씨 + 길찾기 시작 */}
+        {store.screen === "browse" && !picked && (
+          <div className="mb-2 flex items-end gap-2 px-3">
+            <WeatherCard />
+            <button
+              onClick={() => store.setScreen("routeInput")}
+              className="pointer-events-auto flex items-center gap-2 rounded-full bg-brand px-5 py-3.5 text-[16px] font-bold text-white shadow-float active:bg-brand-dark"
+            >
+              <IconWalk className="h-5 w-5" />
+              코스 찾기
+            </button>
+          </div>
+        )}
+
+        {/* 시트를 펼치면 시각 막대까지 두기엔 화면이 좁다. 시각은 구간마다 적혀 있다 */}
+        {!sheetOpen && (
+          <div className="pb-2">
+            <TimeBar />
+          </div>
+        )}
 
         {picked && (
           <PlaceCard
@@ -225,9 +254,7 @@ export default function Page() {
           />
         )}
 
-        {store.screen === "routeResult" && <RouteSheet />}
-
-        <BottomNav />
+        {store.screen === "routeResult" && <PlanSheet />}
       </div>
 
       {editing && (
@@ -237,7 +264,7 @@ export default function Page() {
               ? "출발지 검색"
               : editing === "destination"
                 ? "도착지 검색"
-                : "장소, 주소 검색"
+                : "목적지 검색"
           }
           initial=""
           onClose={() => setEditing(null)}
@@ -249,6 +276,9 @@ export default function Page() {
           }
         />
       )}
+
+      {store.prefsOpen && <PrefsSheet />}
+      {!store.onboarded && <Onboarding />}
     </main>
   );
 }

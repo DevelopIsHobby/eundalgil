@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { Map as MapLibreMap, Marker, type GeoJSONSource, type LayerSpecification } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { useApp } from "@/lib/store";
+import { useActivePlan, useApp } from "@/lib/store";
 import { useLatest } from "@/lib/useDebounced";
 import { getSunState } from "@/lib/sun";
 import { ShadeIndex, buildShadows, type ShadowPoly } from "@/lib/shadow";
 import { fetchOsmBundle } from "@/lib/osm";
 import { distMeters, pathLength, type LngLat } from "@/lib/geo";
-import type { RouteOption } from "@/lib/router";
+import type { Leg, Plan, RideLeg } from "@/lib/plan";
 import { MIN_DATA_ZOOM, REFETCH_PAD_M, DEFAULT_CENTER, DEFAULT_ZOOM } from "@/lib/config";
 import { basemapStyle, EXTRA_ATTRIBUTION } from "@/lib/basemap";
 
@@ -21,11 +21,21 @@ export function getMap() {
 
 const ROUTE_SRC = "eundalgil-routes";
 
-const ROUTE_COLOR: Record<RouteOption["id"], string> = { fast: "#2E6FF2", shade: "#00A86B" };
-const ROUTE_COLOR_DIM: Record<RouteOption["id"], string> = { fast: "#9DB6E6", shade: "#8FD3B6" };
+const WALK_SHADE = "#00A86B";
+const WALK_SUN = "#F5A524";
+const RIDE_FALLBACK: Record<"bus" | "subway" | "tram" | "train", string> = {
+  bus: "#2E6FF2",
+  subway: "#5B4CE0",
+  tram: "#0B7BC1",
+  train: "#3F4B5B",
+};
 
-const COLOR_MAIN = ["match", ["get", "rid"], "shade", ROUTE_COLOR.shade, ROUTE_COLOR.fast] as const;
-const COLOR_DIM = ["match", ["get", "rid"], "shade", ROUTE_COLOR_DIM.shade, ROUTE_COLOR_DIM.fast] as const;
+/** 노선에 색이 등록돼 있으면 그 색을, 없으면 수단별 기본색을 쓴다 */
+export function rideColorOf(leg: RideLeg) {
+  const c = leg.ride.pattern.colour;
+  if (c && /^#?[0-9a-f]{6}$/i.test(c)) return c.startsWith("#") ? c : `#${c}`;
+  return RIDE_FALLBACK[leg.ride.pattern.mode];
+}
 
 /**
  * 경로 굵기는 줌에 따라 키운다. 고정 폭이면 넓게 볼 때 실처럼 가늘어져
@@ -35,54 +45,45 @@ const widthAt = (z12: number, z16: number, z19: number) =>
   ["interpolate", ["linear"], ["zoom"], 12, z12, 16, z16, 19, z19] as const;
 
 /**
- * 경로는 아래에서 위로 겹쳐 그린다.
- * 선택되지 않은 경로(테두리 → 본선)를 먼저 깔고, 선택된 경로를 그 위에 올린다.
+ * 아래에서 위로 겹쳐 그린다.
+ * 승차 구간(굵은 색선) → 도보 구간(그늘/햇빛) → 햇빛 표시 파선 순.
  */
 const ROUTE_LAYERS: LayerSpecification[] = [
   {
-    id: "route-casing-dim",
+    id: "route-ride-casing",
     type: "line",
     source: ROUTE_SRC,
-    filter: ["all", ["==", ["get", "role"], "casing"], ["==", ["get", "active"], 0]],
+    filter: ["==", ["get", "role"], "ride"],
     layout: { "line-cap": "round", "line-join": "round" },
-    paint: { "line-color": "#FFFFFF", "line-width": widthAt(6, 11, 17) as never, "line-opacity": 0.7 },
+    paint: { "line-color": "#FFFFFF", "line-width": widthAt(9, 15, 23) as never, "line-opacity": 1 },
   },
   {
-    id: "route-dim",
+    id: "route-ride",
     type: "line",
     source: ROUTE_SRC,
-    filter: ["==", ["get", "role"], "dim"],
+    filter: ["==", ["get", "role"], "ride"],
     layout: { "line-cap": "round", "line-join": "round" },
-    paint: { "line-color": COLOR_DIM as never, "line-width": widthAt(4, 7, 11) as never, "line-opacity": 0.95 },
+    paint: { "line-color": ["get", "color"] as never, "line-width": widthAt(6, 10, 16) as never },
   },
   {
     id: "route-casing-active",
     type: "line",
     source: ROUTE_SRC,
-    filter: ["all", ["==", ["get", "role"], "casing"], ["==", ["get", "active"], 1]],
+    filter: ["==", ["get", "role"], "casing"],
     layout: { "line-cap": "round", "line-join": "round" },
     paint: { "line-color": "#FFFFFF", "line-width": widthAt(9, 15, 23) as never, "line-opacity": 1 },
   },
   {
-    id: "route-seg-shade",
+    id: "route-seg",
     type: "line",
     source: ROUTE_SRC,
-    filter: ["all", ["==", ["get", "role"], "seg"], ["==", ["get", "shady"], 1]],
+    filter: ["==", ["get", "role"], "seg"],
     layout: { "line-cap": "round", "line-join": "round" },
-    paint: { "line-color": COLOR_MAIN as never, "line-width": widthAt(6, 10, 16) as never },
+    paint: { "line-color": ["get", "color"] as never, "line-width": widthAt(6, 10, 16) as never },
   },
   {
-    // 햇빛 구간도 같은 굵기의 실선으로 깔아 경로가 끊겨 보이지 않게 한다
-    id: "route-seg-sun",
-    type: "line",
-    source: ROUTE_SRC,
-    filter: ["all", ["==", ["get", "role"], "seg"], ["==", ["get", "shady"], 0]],
-    layout: { "line-cap": "round", "line-join": "round" },
-    paint: { "line-color": "#F5A524", "line-width": widthAt(6, 10, 16) as never },
-  },
-  {
-    // 그 위에 흰 파선을 얹어 "여기는 햇빛" 을 표시한다. 파선은 round cap 과 같이 쓰면
-    // 뭉개져서 butt 로 둔다
+    // 햇빛 구간 위에 흰 파선을 얹어 "여기는 햇빛" 을 표시한다.
+    // 파선은 round cap 과 같이 쓰면 뭉개져서 butt 로 둔다
     id: "route-seg-sun-hatch",
     type: "line",
     source: ROUTE_SRC,
@@ -97,13 +98,16 @@ const ROUTE_LAYERS: LayerSpecification[] = [
   },
 ];
 
-type RouteProps = { role: "casing" | "dim" | "seg"; rid: string; active: number; shady: number };
+type RouteProps = { role: "casing" | "seg" | "ride"; color: string; shady: number };
 type RouteFC = GeoJSON.FeatureCollection<GeoJSON.LineString, RouteProps>;
 
 const EMPTY_FC: RouteFC = { type: "FeatureCollection", features: [] };
 
-function buildRouteFC(routes: RouteOption[], selected: RouteOption["id"] | null): RouteFC {
+/** 여정 하나를 지도에 그릴 선들로 편다 */
+function buildPlanFC(plan: Plan | null): RouteFC {
   const features: RouteFC["features"] = [];
+  if (!plan) return { type: "FeatureCollection", features };
+
   const line = (path: LngLat[], props: RouteProps) => {
     if (path.length < 2) return;
     features.push({
@@ -113,16 +117,19 @@ function buildRouteFC(routes: RouteOption[], selected: RouteOption["id"] | null)
     });
   };
 
-  for (const r of routes) {
-    const active = r.id === selected;
-    line(r.path, { role: "casing", rid: r.id, active: active ? 1 : 0, shady: 0 });
-    if (!active) {
-      line(r.path, { role: "dim", rid: r.id, active: 0, shady: 0 });
+  for (const leg of plan.legs as Leg[]) {
+    if (leg.type === "ride") {
+      line(leg.ride.path, { role: "ride", color: rideColorOf(leg), shady: 1 });
       continue;
     }
-    // 선택된 경로만 그늘/햇빛 구간을 나눠 칠한다
-    for (const seg of r.segments) {
-      line(seg.path, { role: "seg", rid: r.id, active: 1, shady: seg.shade >= 0.5 ? 1 : 0 });
+    line(leg.route.path, { role: "casing", color: "#FFFFFF", shady: 0 });
+    for (const seg of leg.route.segments) {
+      const shady = seg.shade >= 0.5;
+      line(seg.path, {
+        role: "seg",
+        color: shady ? WALK_SHADE : WALK_SUN,
+        shady: shady ? 1 : 0,
+      });
     }
   }
   return { type: "FeatureCollection", features };
@@ -142,12 +149,6 @@ function applyRoutes(map: MapLibreMap, fc: RouteFC) {
   map.addSource(ROUTE_SRC, { type: "geojson", data: fc });
   for (const layer of ROUTE_LAYERS) map.addLayer(layer);
 }
-
-/** 지도 위 말풍선에 쓰는 이름. 시트의 "최단"·"그늘" 배지보다 길게 풀어 쓴다 */
-const ROUTE_LABEL: Record<RouteOption["id"], string> = {
-  fast: "최단 경로",
-  shade: "그늘 많은 길",
-};
 
 /**
  * 말풍선·출발/도착 핀은 좌표 위로 솟는다. 그 높이만큼 지도 위쪽에 여유를 두지 않으면
@@ -179,20 +180,22 @@ function pointAlong(path: LngLat[], frac: number): LngLat | null {
   return path[path.length - 1];
 }
 
-function makeRouteLabelElement(text: string, color: string, active: boolean) {
+/** 지도 위 말풍선 — 승·하차 정류장과 노선 번호를 알려 준다 */
+function makeLabelElement(text: string, color: string, filled: boolean) {
   const el = document.createElement("div");
-  // 눌러서 경로를 고를 수 있어야 하므로 이것만 클릭을 받는다
-  el.style.cssText = "cursor:pointer;transform:translateY(-6px)";
+  el.style.cssText = "pointer-events:none;transform:translateY(-6px)";
+  // 정류장 이름이 길면 지도를 다 덮으므로 잘라 준다
+  const label = text.length > 16 ? `${text.slice(0, 15)}…` : text;
   el.innerHTML = `
     <div style="display:flex;flex-direction:column;align-items:center">
-      <div style="background:${active ? color : "#FFFFFF"};color:${active ? "#fff" : color};
-                  border:${active ? "none" : `1.5px solid ${color}`};
+      <div style="background:${filled ? color : "#FFFFFF"};color:${filled ? "#fff" : "#1A1A1A"};
+                  border:${filled ? "none" : `1.5px solid ${color}`};
                   font-size:12px;font-weight:700;letter-spacing:-0.2px;
                   padding:5px 10px;border-radius:999px;white-space:nowrap;
-                  box-shadow:0 2px 8px rgba(0,0,0,.22)">${text}</div>
+                  box-shadow:0 2px 8px rgba(0,0,0,.22)">${label}</div>
       <div style="width:0;height:0;margin-top:-1px;
                   border-left:5px solid transparent;border-right:5px solid transparent;
-                  border-top:6px solid ${active ? color : "#FFFFFF"}"></div>
+                  border-top:6px solid ${filled ? color : "#FFFFFF"}"></div>
     </div>`;
   return el;
 }
@@ -524,13 +527,15 @@ export default function MapView({
    */
 
   /* ---------------- 경로 렌더 ---------------- */
-  const { routes, selectedRoute, origin, destination, screen } = store;
+  const { origin, destination, screen } = store;
+  const plan = useActivePlan();
+
   useEffect(() => {
-    const fc = buildRouteFC(routes, selectedRoute);
+    const fc = buildPlanFC(plan);
     routeFCRef.current = fc;
     const map = mapRef;
     if (map && styleReady.current) applyRoutes(map, fc);
-  }, [routes, selectedRoute]);
+  }, [plan]);
 
   /* ---------------- 출발·도착 마커 ---------------- */
   useEffect(() => {
@@ -556,7 +561,7 @@ export default function MapView({
     };
   }, [origin, destination, screen]);
 
-  /* ---------------- 경로 이름 말풍선 ---------------- */
+  /* ---------------- 승·하차 말풍선 ---------------- */
   useEffect(() => {
     const map = mapRef;
     if (!map) return;
@@ -564,27 +569,33 @@ export default function MapView({
     labelMarkersRef.current.forEach((m) => m.remove());
     labelMarkersRef.current = [];
 
-    // 경로가 둘이면 서로 다른 지점에 놓아 말풍선끼리 겹치지 않게 한다
-    const fracs = routes.length > 1 ? [0.38, 0.62] : [0.5];
-
-    routes.forEach((r, i) => {
-      const at = pointAlong(r.path, fracs[i] ?? 0.5);
-      if (!at) return;
-      const active = r.id === selectedRoute;
-      const el = makeRouteLabelElement(ROUTE_LABEL[r.id], ROUTE_COLOR[r.id], active);
-      el.addEventListener("click", (e) => {
-        e.stopPropagation();
-        useApp.getState().selectRoute(r.id);
-      });
-      const marker = new Marker({ element: el, anchor: "bottom" }).setLngLat(at).addTo(map);
+    const add = (at: LngLat, text: string, color: string, filled: boolean) => {
+      const marker = new Marker({ element: makeLabelElement(text, color, filled), anchor: "bottom" })
+        .setLngLat(at)
+        .addTo(map);
       labelMarkersRef.current.push(marker);
-    });
+    };
+
+    if (plan) {
+      const rides = plan.legs.filter((l): l is RideLeg => l.type === "ride");
+      for (const leg of rides) {
+        const color = rideColorOf(leg);
+        const line = leg.ride.pattern.ref || leg.ride.pattern.name;
+        add(leg.ride.from.p, `승차 · ${line}`, color, true);
+        add(leg.ride.to.p, `하차 · ${leg.ride.to.name}`, color, false);
+      }
+      // 대중교통이 없으면 도보 경로에 한 장만 얹는다
+      if (!rides.length && plan.legs[0]?.type === "walk") {
+        const at = pointAlong(plan.path, 0.5);
+        if (at) add(at, plan.style === "shade" ? "그늘 많은 길" : "최단 경로", WALK_SHADE, true);
+      }
+    }
 
     return () => {
       labelMarkersRef.current.forEach((m) => m.remove());
       labelMarkersRef.current = [];
     };
-  }, [routes, selectedRoute]);
+  }, [plan]);
 
   return (
     <div className="map-root absolute inset-0">

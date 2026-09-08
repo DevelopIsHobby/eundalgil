@@ -1,79 +1,46 @@
 "use client";
 
+import { useMemo } from "react";
 import { BRAND } from "@/lib/config";
 import { useApp } from "@/lib/store";
-import { IconMenu, IconMic, IconSearch, IconStairs, IconSun, IconTree, IconWalk } from "./icons";
-
-function Chip({
-  active,
-  primary,
-  onClick,
-  icon,
-  children,
-}: {
-  active?: boolean;
-  primary?: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  const tone = primary
-    ? "border-brand bg-brand text-white"
-    : active
-      ? "border-brand bg-brand-soft text-brand"
-      : "border-line-strong bg-white text-ink-700";
-  return (
-    <button
-      onClick={onClick}
-      aria-pressed={primary ? undefined : !!active}
-      className={`flex shrink-0 items-center gap-1 rounded-full border px-3 py-1.5 text-[13px] font-medium shadow-sm transition-colors ${tone}`}
-    >
-      <span className="[&>svg]:h-[15px] [&>svg]:w-[15px]">{icon}</span>
-      {children}
-    </button>
-  );
-}
+import { getSunState } from "@/lib/sun";
+import { IconMoon, IconSearch, IconSun } from "./icons";
 
 export default function TopBar({ onSearch }: { onSearch: () => void }) {
-  const { showShadow, showTrees, avoidSteps, toggle, setScreen } = useApp();
+  const { timeMs, center, openPrefs } = useApp();
+  const sun = useMemo(() => getSunState(new Date(timeMs), center), [timeMs, center]);
 
   return (
     <div className="pointer-events-auto px-3 pt-3">
-      <div className="flex h-11 items-center gap-2 rounded-lg bg-white pl-2 pr-1 shadow-card">
-        <button className="grid h-8 w-8 place-items-center text-ink-700" aria-label="메뉴">
-          <IconMenu />
-        </button>
+      <div className="flex h-[52px] items-center gap-1.5 rounded-[26px] bg-white pl-3 pr-1.5 shadow-card">
         <button
           onClick={onSearch}
-          className="flex-1 text-left text-[15px] text-ink-400"
-        >
-          장소, 주소 검색
-        </button>
-        <button className="grid h-8 w-8 place-items-center text-ink-500" aria-label="음성 검색">
-          <IconMic />
-        </button>
-        <button
-          onClick={onSearch}
-          className="grid h-9 w-9 place-items-center rounded-md text-brand"
-          aria-label="검색"
+          aria-label="목적지 검색"
+          className="grid h-9 w-9 shrink-0 place-items-center text-ink-700"
         >
           <IconSearch />
         </button>
-      </div>
+        <button onClick={onSearch} className="min-w-0 flex-1 truncate text-left text-[16px] text-ink-400">
+          목적지 검색
+        </button>
 
-      <div className="no-scrollbar mt-2 flex gap-1.5 overflow-x-auto pb-0.5">
-        <Chip primary onClick={() => setScreen("routeInput")} icon={<IconWalk />}>
-          길찾기
-        </Chip>
-        <Chip active={showShadow} onClick={() => toggle("showShadow")} icon={<IconSun />}>
-          그늘
-        </Chip>
-        <Chip active={showTrees} onClick={() => toggle("showTrees")} icon={<IconTree />}>
-          가로수
-        </Chip>
-        <Chip active={avoidSteps} onClick={() => toggle("avoidSteps")} icon={<IconStairs />}>
-          계단 회피
-        </Chip>
+        {/* 지금 이 시각의 태양 고도 — 그늘이 얼마나 길지 가늠하는 값이다 */}
+        <span
+          className={`flex shrink-0 items-center gap-1 rounded-full px-2.5 py-1.5 text-[13px] font-bold ${
+            sun.isDay ? "bg-[#FFF4E0] text-[#C97A00]" : "bg-[#EEF0FB] text-route-night"
+          }`}
+        >
+          {sun.isDay ? <IconSun className="h-[15px] w-[15px]" /> : <IconMoon className="h-[15px] w-[15px]" />}
+          {sun.isDay ? `태양 고도 ${Math.round(sun.altitudeDeg)}°` : "일몰 후"}
+        </span>
+
+        <button
+          onClick={() => openPrefs(true)}
+          aria-label="길 취향 설정"
+          className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand-soft text-[13px] font-extrabold text-brand"
+        >
+          응
+        </button>
       </div>
 
       <span className="sr-only">

@@ -13,6 +13,8 @@ export type WalkWay = {
   name?: string;
   /** 지붕/아케이드 등 상시 그늘 구간 */
   covered?: boolean;
+  /** 차량 통행이 많은 큰길 — "길 분위기" 취향에 쓴다 */
+  major?: boolean;
   /** path 좌표별 고도(m). DEM 을 못 받으면 없다 */
   elev?: number[];
 };

@@ -1,6 +1,8 @@
 import { LngLat, distMeters, EARTH_M_PER_DEG_LAT, mPerDegLon, resample } from "./geo";
 import type { WalkWay } from "./osm";
 import type { ShadeIndex } from "./shadow";
+import type { SafetyIndex } from "./safety";
+import { FASTEST_WEIGHTS, weightsAreNeutral, type RouteWeights } from "./prefs";
 
 export type Edge = {
   to: number;
@@ -11,8 +13,12 @@ export type Edge = {
   covered: boolean;
   /** 0~1 그늘 비율 (applyShade 이후 채워짐) */
   shade: number;
+  /** 0~1 방범시설 근접도 (applySafety 이후 채워짐) */
+  safety: number;
   /** 이 방향으로 갈 때 올라가는 높이(m). 내리막이면 0 */
   climb: number;
+  /** 차량이 많은 큰길인지 — "길 분위기" 취향에 쓴다 */
+  major: boolean;
   name?: string;
 };
 
@@ -91,7 +97,15 @@ export function buildGraph(ways: WalkWay[], refLat = 37.5, cellMeters = 80): Gra
       const ia = idOf(a);
       const ib = idOf(b);
       if (ia === ib) continue;
-      const base = { length: len, kind: w.kind, covered: !!w.covered, shade: 0, name: w.name };
+      const base = {
+        length: len,
+        kind: w.kind,
+        covered: !!w.covered,
+        major: !!w.major,
+        shade: 0,
+        safety: 0,
+        name: w.name,
+      };
       // 고도 차이는 방향에 따라 한쪽만 오르막이다
       const rise = w.elev ? w.elev[i] - w.elev[i - 1] : 0;
       adj[ia].push({ ...base, to: ib, path: [a, b], climb: Math.max(0, rise) });
@@ -147,6 +161,35 @@ export function applyShade(graph: Graph, shade: ShadeIndex) {
   }
 }
 
+/**
+ * 각 간선의 방범시설(가로등·CCTV·비상벨) 근접도를 채운다.
+ * 야간에 "방범시설 많은 길" 취향을 켰을 때만 쓰이므로 그때만 부른다.
+ */
+export function applySafety(graph: Graph, safety: SafetyIndex) {
+  const memo = new Map<string, number>();
+  for (let i = 0; i < graph.adj.length; i++) {
+    for (const e of graph.adj[i]) {
+      const a = e.path[0];
+      const b = e.path[e.path.length - 1];
+      const k =
+        a[0] < b[0] || (a[0] === b[0] && a[1] < b[1])
+          ? `${nodeKey(a)}|${nodeKey(b)}`
+          : `${nodeKey(b)}|${nodeKey(a)}`;
+      const cached = memo.get(k);
+      if (cached !== undefined) {
+        e.safety = cached;
+        continue;
+      }
+      const samples = e.length > 30 ? resample(e.path, 15) : [midpoint(a, b)];
+      let sum = 0;
+      for (const s of samples) sum += safety.coverAt(s);
+      const v = sum / samples.length;
+      memo.set(k, v);
+      e.safety = v;
+    }
+  }
+}
+
 /** 좌표에서 가장 가까운 그래프 노드 (반경 내 없으면 -1) */
 export function snap(graph: Graph, p: LngLat, maxMeters = 250): number {
   const cx = Math.floor(p[0] / graph.cellLng);
@@ -173,13 +216,6 @@ export function snap(graph: Graph, p: LngLat, maxMeters = 250): number {
   return best;
 }
 
-export type RoutePreference = {
-  /** 그늘 선호도 0(무시) ~ 1.5(적극 우회) */
-  shadeWeight: number;
-  /** 계단 회피 */
-  avoidSteps: boolean;
-};
-
 export type RouteResult = {
   path: LngLat[];
   /** m */
@@ -188,6 +224,8 @@ export type RouteResult = {
   duration: number;
   /** 0~1 */
   shadeRatio: number;
+  /** 0~1 — 지나는 길의 방범시설 근접도 (야간 안내용) */
+  safetyRatio: number;
   stepsMeters: number;
   crossings: number;
   /** 총 오르막 높이(m) */
@@ -202,11 +240,12 @@ export type RouteResult = {
 };
 
 /** 간선 하나를 걷는 데 걸리는 실제 시간(초) */
-function edgeTime(e: Edge) {
+function edgeTime(e: Edge, hillPenalty = 1) {
   const speed = WALK_SPEED_MPS * (KIND_SPEED[e.kind] ?? 1);
   return (
     e.length / speed +
-    e.climb * ASCENT_SEC_PER_M +
+    // 언덕을 피하고 싶다는 취향은 "오르막이 실제보다 더 힘들게 느껴진다"로 번역한다
+    e.climb * ASCENT_SEC_PER_M * hillPenalty +
     (e.kind === "crossing" ? CROSSING_WAIT_S : 0)
   );
 }
@@ -268,15 +307,24 @@ class MinHeap {
  * 탐색 비용. 기본 단위는 "체감 시간(초)"이다.
  * 이렇게 두면 최단 경로가 화면에 표시되는 소요 시간 기준으로도 실제 최단이 된다.
  */
-function edgeCost(e: Edge, pref: RoutePreference) {
-  let t = edgeTime(e);
-  if (pref.avoidSteps && e.kind === "steps") t *= 2.5;
-  // 햇빛 구간에 비용을 더한다 (완전한 그늘 구간은 가산 없음)
-  return t * (1 + pref.shadeWeight * (1 - e.shade));
+function edgeCost(e: Edge, w: RouteWeights) {
+  if (w.excludeSteps && e.kind === "steps") return Infinity;
+
+  let t = edgeTime(e, w.hillPenalty);
+  if (e.kind === "steps") t *= w.stepPenalty;
+
+  // 가산은 모두 1 이상의 배율로만 붙인다. 비용이 실제 소요 시간보다 작아지지 않아야
+  // A* 의 직선거리 휴리스틱이 계속 유효하다.
+  let m = 1;
+  m += w.sunPenalty * (1 - e.shade); // 그늘 선호 — 햇빛 구간에 가산
+  m += w.shadePenalty * e.shade; // 볕 선호 — 그늘 구간에 가산
+  m += e.major ? w.majorPenalty : w.minorPenalty; // 길 분위기
+  m += w.darkPenalty * (1 - e.safety); // 야간 방범시설
+  return t * m;
 }
 
 /** A* (직선거리 휴리스틱). 목적지까지 최소비용 경로의 간선 목록을 반환 */
-function search(graph: Graph, from: number, to: number, pref: RoutePreference): Edge[] | null {
+function search(graph: Graph, from: number, to: number, w: RouteWeights): Edge[] | null {
   const n = graph.nodes.length;
   const dist = new Float64Array(n).fill(Infinity);
   const prevNode = new Int32Array(n).fill(-1);
@@ -296,7 +344,9 @@ function search(graph: Graph, from: number, to: number, pref: RoutePreference): 
     done[u] = 1;
     if (u === to) break;
     for (const e of graph.adj[u]) {
-      const nd = dist[u] + edgeCost(e, pref);
+      const cost = edgeCost(e, w);
+      if (!Number.isFinite(cost)) continue;
+      const nd = dist[u] + cost;
       if (nd < dist[e.to]) {
         dist[e.to] = nd;
         prevNode[e.to] = u;
@@ -329,6 +379,7 @@ function toResult(edges: Edge[], start: LngLat, end: LngLat): RouteResult {
   let crossings = 0;
   let ascent = 0;
   let shadeWeighted = 0;
+  let safetyWeighted = 0;
   const streets: RouteResult["streets"] = [];
 
   for (const e of edges) {
@@ -336,6 +387,7 @@ function toResult(edges: Edge[], start: LngLat, end: LngLat): RouteResult {
     distance += e.length;
     seconds += edgeTime(e);
     shadeWeighted += e.shade * e.length;
+    safetyWeighted += e.safety * e.length;
     if (e.kind === "steps") stepsMeters += e.length;
     if (e.kind === "crossing") crossings += 1;
     ascent += e.climb;
@@ -367,6 +419,7 @@ function toResult(edges: Edge[], start: LngLat, end: LngLat): RouteResult {
     distance: total,
     duration: seconds + approach / WALK_SPEED_MPS,
     shadeRatio: distance > 0 ? shadeWeighted / distance : 0,
+    safetyRatio: distance > 0 ? safetyWeighted / distance : 0,
     stepsMeters,
     crossings,
     ascent: Math.round(ascent),
@@ -380,11 +433,52 @@ export type RouteOption = RouteResult & {
   label: string;
 };
 
+/** 직선으로 이은 대체 경로 — 보행로 데이터가 닿지 않는 짧은 접근 구간에 쓴다 */
+export function straightRoute(start: LngLat, end: LngLat): RouteResult {
+  // 실제로는 골목을 돌아가므로 직선거리에 약간의 여유를 둔다
+  const d = distMeters(start, end) * 1.25;
+  return {
+    path: [start, end],
+    distance: d,
+    duration: d / WALK_SPEED_MPS,
+    shadeRatio: 0,
+    safetyRatio: 0,
+    stepsMeters: 0,
+    crossings: 0,
+    ascent: 0,
+    segments: [{ path: [start, end], shade: 0 }],
+    streets: [],
+  };
+}
+
+/**
+ * 두 지점 사이의 경로 하나. 대중교통 여정의 접근·환승·마무리 도보 구간에 쓴다.
+ * 그래프 밖이면 null 을 돌려주고, 부르는 쪽이 `straightRoute` 로 어림잡는다.
+ */
+export function routeBetween(
+  graph: Graph,
+  start: LngLat,
+  end: LngLat,
+  w: RouteWeights,
+  snapRadius = 220
+): RouteResult | null {
+  const s = snap(graph, start, snapRadius);
+  const t = snap(graph, end, snapRadius);
+  if (s < 0 || t < 0) return null;
+  if (s === t) return straightRoute(start, end);
+  let edges = search(graph, s, t, w);
+  // 계단을 완전히 뺐더니 길이 끊기면, 그 조건만 풀어서 한 번 더 찾는다
+  if (!edges && w.excludeSteps) edges = search(graph, s, t, { ...w, excludeSteps: false });
+  if (!edges) return null;
+  return toResult(edges, start, end);
+}
+
 export function findRoutes(
   graph: Graph,
   start: LngLat,
   end: LngLat,
-  opts: RoutePreference
+  weights: RouteWeights,
+  preferLabel = "그늘로 추천"
 ): { routes: RouteOption[]; error?: string } {
   const s = snap(graph, start);
   const t = snap(graph, end);
@@ -392,20 +486,23 @@ export function findRoutes(
     return { routes: [], error: "출발지·목적지 근처에 보행 가능한 길 데이터가 없습니다." };
   if (s === t) return { routes: [], error: "출발지와 목적지가 너무 가깝습니다." };
 
-  const fastEdges = search(graph, s, t, { shadeWeight: 0, avoidSteps: opts.avoidSteps });
+  const fastEdges = search(graph, s, t, FASTEST_WEIGHTS);
   if (!fastEdges)
     return { routes: [], error: "경로를 찾지 못했습니다. 조금 더 가까운 지점으로 시도해 주세요." };
   const fast = toResult(fastEdges, start, end);
 
   const routes: RouteOption[] = [{ ...fast, id: "fast", label: "최단" }];
 
-  if (opts.shadeWeight > 0) {
-    const shadeEdges = search(graph, s, t, opts);
-    if (shadeEdges) {
-      const shade = toResult(shadeEdges, start, end);
-      const sameLength = Math.abs(shade.distance - fast.distance) < 5;
-      const sameShade = Math.abs(shade.shadeRatio - fast.shadeRatio) < 0.02;
-      if (!(sameLength && sameShade)) routes.push({ ...shade, id: "shade", label: "그늘" });
+  // 취향이 최단 경로와 같은 답을 낼 수밖에 없는 설정이면 한 번만 찾는다
+  if (!weightsAreNeutral(weights)) {
+    let prefEdges = search(graph, s, t, weights);
+    if (!prefEdges && weights.excludeSteps)
+      prefEdges = search(graph, s, t, { ...weights, excludeSteps: false });
+    if (prefEdges) {
+      const pref = toResult(prefEdges, start, end);
+      const sameLength = Math.abs(pref.distance - fast.distance) < 5;
+      const sameShade = Math.abs(pref.shadeRatio - fast.shadeRatio) < 0.02;
+      if (!(sameLength && sameShade)) routes.push({ ...pref, id: "shade", label: preferLabel });
     }
   }
   return { routes };
@@ -420,3 +517,5 @@ export function formatDuration(sec: number) {
   if (min < 60) return `${min}분`;
   return `${Math.floor(min / 60)}시간 ${min % 60}분`;
 }
+
+export { WALK_SPEED_MPS };

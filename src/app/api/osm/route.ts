@@ -62,6 +62,13 @@ const PAVED = /^(paved|asphalt|concrete|paving_stones|sett|metal|wood)$/;
 /** 차가 다니는 등급의 도로 */
 const MOTOR_ROAD = /^(motorway|trunk|primary|secondary|tertiary)(_link)?$/;
 
+/** 왕복 차선이 많거나 간선도로인 길 — 조용한 길을 원하는 사람에게는 피할 대상이다 */
+const MAJOR_HIGHWAY = new Set(["trunk", "primary", "secondary", "trunk_link", "primary_link", "secondary_link"]);
+
+function isMajor(tags: Record<string, string>) {
+  return MAJOR_HIGHWAY.has(tags.highway ?? "") || Number(tags.lanes ?? 0) >= 6;
+}
+
 function walkable(tags: Record<string, string>) {
   if (tags.foot === "no" || tags.access === "private" || tags.access === "no") return false;
   if (tags.indoor === "yes") return false;
@@ -152,6 +159,7 @@ export async function GET(req: NextRequest) {
           path,
           kind: wayKind(tags, inWood(path[Math.floor(path.length / 2)])),
           incline: tags.incline,
+          major: isMajor(tags),
           name: tags.name,
           covered: tags.covered === "yes" || tags.tunnel === "building_passage",
         });

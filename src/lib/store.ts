@@ -3,13 +3,16 @@
 import { create } from "zustand";
 import type { LngLat } from "./geo";
 import type { OsmBundle } from "./osm";
-import type { RouteOption } from "./router";
-import { DEFAULT_CENTER, DEFAULT_ZOOM, ShadePresetId } from "./config";
+import type { PlanPair, PlanStyle } from "./plan";
+import { DEFAULT_PREFS, loadPrefs, savePrefs, type Prefs } from "./prefs";
+import { DEFAULT_CENTER, DEFAULT_ZOOM } from "./config";
 import type { BasemapId } from "./basemap";
 
 export type Place = { name: string; address?: string; p: LngLat };
 
 export type Screen = "browse" | "routeInput" | "routeResult";
+
+export type Weather = { tempC: number; label: string; code: number } | null;
 
 type State = {
   screen: Screen;
@@ -25,8 +28,11 @@ type State = {
   origin: Place | null;
   destination: Place | null;
 
-  shadePreset: ShadePresetId;
-  avoidSteps: boolean;
+  /** 온보딩에서 고른 취향 — 경로 비용에 그대로 반영된다 */
+  prefs: Prefs;
+  onboarded: boolean;
+  prefsOpen: boolean;
+
   showShadow: boolean;
   showTrees: boolean;
 
@@ -34,11 +40,18 @@ type State = {
   dataLoading: boolean;
   dataError: string | null;
 
-  routes: RouteOption[];
-  routeError: string | null;
+  /** 이동 수단 조합별로 "그늘로 추천 / 최단" 두 벌씩 */
+  plans: PlanPair[];
+  planIndex: number;
+  planStyle: PlanStyle;
+  planError: string | null;
+  /** 경로 시트를 펼쳤는지 — 펼치면 지도 위 다른 UI 를 접어 자리를 낸다 */
+  sheetExpanded: boolean;
+  /** 결과와 함께 알려 줄 것들 (노선 데이터가 없다거나, 방범시설 정보가 성기다거나) */
+  notices: string[];
   routing: boolean;
-  selectedRoute: RouteOption["id"] | null;
 
+  weather: Weather;
   toast: string | null;
 };
 
@@ -50,14 +63,24 @@ type Actions = {
   setOrigin: (p: Place | null) => void;
   setDestination: (p: Place | null) => void;
   swapEnds: () => void;
-  setShadePreset: (id: ShadePresetId) => void;
-  toggle: (k: "avoidSteps" | "showShadow" | "showTrees") => void;
+
+  hydratePrefs: () => void;
+  setPrefs: (p: Partial<Prefs>) => void;
+  finishOnboarding: () => void;
+  openPrefs: (v: boolean) => void;
+
+  toggle: (k: "showShadow" | "showTrees") => void;
   setData: (d: OsmBundle | null) => void;
   setDataLoading: (v: boolean) => void;
   setDataError: (v: string | null) => void;
-  setRoutes: (r: RouteOption[], err?: string | null) => void;
+
+  setPlans: (plans: PlanPair[], err?: string | null, notices?: string[]) => void;
+  selectPlan: (i: number) => void;
+  setPlanStyle: (s: PlanStyle) => void;
+  setSheetExpanded: (v: boolean) => void;
   setRouting: (v: boolean) => void;
-  selectRoute: (id: RouteOption["id"]) => void;
+
+  setWeather: (w: Weather) => void;
   showToast: (msg: string | null) => void;
   reset: () => void;
 };
@@ -74,8 +97,11 @@ export const useApp = create<State & Actions>((set, get) => ({
   origin: null,
   destination: null,
 
-  shadePreset: "mild",
-  avoidSteps: false,
+  prefs: DEFAULT_PREFS,
+  // 서버가 그린 HTML 과 어긋나지 않게 true 로 두고, 마운트 뒤 저장된 값으로 바꾼다
+  onboarded: true,
+  prefsOpen: false,
+
   showShadow: true,
   showTrees: true,
 
@@ -83,11 +109,15 @@ export const useApp = create<State & Actions>((set, get) => ({
   dataLoading: false,
   dataError: null,
 
-  routes: [],
-  routeError: null,
+  plans: [],
+  planIndex: 0,
+  planStyle: "shade",
+  planError: null,
+  sheetExpanded: false,
+  notices: [],
   routing: false,
-  selectedRoute: null,
 
+  weather: null,
   toast: null,
 
   setScreen: (screen) => set({ screen }),
@@ -97,27 +127,53 @@ export const useApp = create<State & Actions>((set, get) => ({
   setOrigin: (origin) => set({ origin }),
   setDestination: (destination) => set({ destination }),
   swapEnds: () => set({ origin: get().destination, destination: get().origin }),
-  setShadePreset: (shadePreset) => set({ shadePreset }),
+
+  hydratePrefs: () => {
+    const { prefs, onboarded } = loadPrefs();
+    set({ prefs, onboarded, planStyle: prefs.sun === "sun" ? "fast" : "shade" });
+  },
+  setPrefs: (patch) => {
+    const prefs = { ...get().prefs, ...patch };
+    set({ prefs });
+    savePrefs(prefs, get().onboarded);
+  },
+  finishOnboarding: () => {
+    set({ onboarded: true });
+    savePrefs(get().prefs, true);
+  },
+  openPrefs: (prefsOpen) => set({ prefsOpen }),
+
   toggle: (k) => set({ [k]: !get()[k] } as Partial<State>),
   setData: (data) => set({ data }),
   setDataLoading: (dataLoading) => set({ dataLoading }),
   setDataError: (dataError) => set({ dataError }),
-  setRoutes: (routes, routeError = null) =>
-    set({
-      routes,
-      routeError,
-      selectedRoute: routes.find((r) => r.id === "shade")?.id ?? routes[0]?.id ?? null,
-    }),
+
+  setPlans: (plans, planError = null, notices = []) =>
+    set({ plans, planError, notices, planIndex: 0 }),
+  selectPlan: (planIndex) => set({ planIndex }),
+  setPlanStyle: (planStyle) => set({ planStyle }),
+  setSheetExpanded: (sheetExpanded) => set({ sheetExpanded }),
   setRouting: (routing) => set({ routing }),
-  selectRoute: (selectedRoute) => set({ selectedRoute }),
+
+  setWeather: (weather) => set({ weather }),
   showToast: (toast) => set({ toast }),
   reset: () =>
     set({
       screen: "browse",
       origin: null,
       destination: null,
-      routes: [],
-      routeError: null,
-      selectedRoute: null,
+      plans: [],
+      planIndex: 0,
+      planError: null,
+      notices: [],
     }),
 }));
+
+/** 지금 화면에 보여 줄 여정 (도보 스타일 토글까지 반영) */
+export function useActivePlan() {
+  return useApp((s) => {
+    const pair = s.plans[s.planIndex];
+    if (!pair) return null;
+    return s.planStyle === "fast" ? pair.fast : pair.shade;
+  });
+}
