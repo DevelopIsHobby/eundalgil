@@ -29,6 +29,12 @@ export type Graph = {
   grid: Map<string, number[]>;
   cellLng: number;
   cellLat: number;
+  /**
+   * 노드가 속한 연결 덩어리 번호.
+   * 보행로 데이터는 통째로 이어져 있지 않다 — 대학 캠퍼스 안길처럼 바깥과 끊긴 섬이 흔하다.
+   * 출발·도착을 각자 가장 가까운 노드에 붙이면 서로 다른 섬에 앉아 경로가 "없다" 고 나온다.
+   */
+  comp: Int32Array;
 };
 
 const KEY_PRECISION = 7;
@@ -123,7 +129,27 @@ export function buildGraph(ways: WalkWay[], refLat = 37.5, cellMeters = 80): Gra
     else grid.set(k, [i]);
   });
 
-  return { nodes, adj, grid, cellLng, cellLat };
+  // 연결 덩어리 번호 매기기 (너비 우선)
+  const comp = new Int32Array(nodes.length).fill(-1);
+  let next = 0;
+  const queue: number[] = [];
+  for (let start = 0; start < nodes.length; start++) {
+    if (comp[start] !== -1) continue;
+    const id = next++;
+    comp[start] = id;
+    queue.length = 0;
+    queue.push(start);
+    for (let head = 0; head < queue.length; head++) {
+      const u = queue[head];
+      for (const e of adj[u]) {
+        if (comp[e.to] !== -1) continue;
+        comp[e.to] = id;
+        queue.push(e.to);
+      }
+    }
+  }
+
+  return { nodes, adj, grid, cellLng, cellLat, comp };
 }
 
 function midpoint(a: LngLat, b: LngLat): LngLat {
@@ -188,6 +214,54 @@ export function applySafety(graph: Graph, safety: SafetyIndex) {
       e.safety = v;
     }
   }
+}
+
+/** 좌표 주변의 그래프 노드들을 가까운 순으로 (반경 내) */
+function nearbyNodes(graph: Graph, p: LngLat, maxMeters: number, limit = 16): number[] {
+  const cx = Math.floor(p[0] / graph.cellLng);
+  const cy = Math.floor(p[1] / graph.cellLat);
+  const found: { i: number; d: number }[] = [];
+  const rings = Math.max(2, Math.ceil(maxMeters / 80));
+  for (let x = cx - rings; x <= cx + rings; x++) {
+    for (let y = cy - rings; y <= cy + rings; y++) {
+      const arr = graph.grid.get(`${x}:${y}`);
+      if (!arr) continue;
+      for (const i of arr) {
+        const d = distMeters(p, graph.nodes[i]);
+        if (d <= maxMeters) found.push({ i, d });
+      }
+    }
+  }
+  found.sort((a, b) => a.d - b.d);
+  return found.slice(0, limit).map((f) => f.i);
+}
+
+/**
+ * 출발·도착을 **서로 이어진** 노드에 붙인다.
+ * 각자 가장 가까운 노드에 붙이면 캠퍼스 안길 같은 섬에 앉아 "경로 없음" 이 되기 쉽다.
+ * 조금 더 걸어 나오더라도 같은 덩어리에 있는 조합을 고른다.
+ */
+export function snapPair(
+  graph: Graph,
+  a: LngLat,
+  b: LngLat,
+  maxMeters = 350
+): [number, number] | null {
+  const as = nearbyNodes(graph, a, maxMeters);
+  const bs = nearbyNodes(graph, b, maxMeters);
+  let best: [number, number] | null = null;
+  let bestCost = Infinity;
+  for (const i of as) {
+    for (const j of bs) {
+      if (i === j || graph.comp[i] !== graph.comp[j]) continue;
+      const cost = distMeters(a, graph.nodes[i]) + distMeters(b, graph.nodes[j]);
+      if (cost < bestCost) {
+        bestCost = cost;
+        best = [i, j];
+      }
+    }
+  }
+  return best;
 }
 
 /** 좌표에서 가장 가까운 그래프 노드 (반경 내 없으면 -1) */
@@ -462,10 +536,9 @@ export function routeBetween(
   w: RouteWeights,
   snapRadius = 220
 ): RouteResult | null {
-  const s = snap(graph, start, snapRadius);
-  const t = snap(graph, end, snapRadius);
-  if (s < 0 || t < 0) return null;
-  if (s === t) return straightRoute(start, end);
+  const pair = snapPair(graph, start, end, snapRadius);
+  if (!pair) return null;
+  const [s, t] = pair;
   let edges = search(graph, s, t, w);
   // 계단을 완전히 뺐더니 길이 끊기면, 그 조건만 풀어서 한 번 더 찾는다
   if (!edges && w.excludeSteps) edges = search(graph, s, t, { ...w, excludeSteps: false });
@@ -478,13 +551,21 @@ export function findRoutes(
   start: LngLat,
   end: LngLat,
   weights: RouteWeights,
-  preferLabel = "그늘로 추천"
+  preferLabel = "그늘 우선"
 ): { routes: RouteOption[]; error?: string } {
-  const s = snap(graph, start);
-  const t = snap(graph, end);
-  if (s < 0 || t < 0)
-    return { routes: [], error: "출발지·목적지 근처에 보행 가능한 길 데이터가 없습니다." };
-  if (s === t) return { routes: [], error: "출발지와 목적지가 너무 가깝습니다." };
+  if (distMeters(start, end) < 30) return { routes: [], error: "출발지와 목적지가 너무 가깝습니다." };
+  const pair = snapPair(graph, start, end);
+  if (!pair) {
+    // 가까운 길은 있는데 서로 이어지지 않는 경우까지 구분해 알린다
+    const near = snap(graph, start, 350) >= 0 && snap(graph, end, 350) >= 0;
+    return {
+      routes: [],
+      error: near
+        ? "두 지점을 잇는 보행로가 데이터에 없습니다. (터널·철길 등으로 끊긴 구간일 수 있어요)"
+        : "출발지·목적지 근처에 보행 가능한 길 데이터가 없습니다.",
+    };
+  }
+  const [s, t] = pair;
 
   const fastEdges = search(graph, s, t, FASTEST_WEIGHTS);
   if (!fastEdges)

@@ -24,9 +24,11 @@ export async function GET(req: Request) {
   const when = new Date();
   when.setHours(Number(url.searchParams.get("h") ?? 15), 0, 0, 0);
 
-  // 앱(useRouting)과 같은 범위를 써야 여기서 본 결과가 화면과 일치한다
+  // 앱(useRouting)과 같은 범위를 써야 여기서 본 결과가 화면과 일치한다.
+  // pad 를 주면 그 값(m)으로 넓혀 본다 — 경로가 끊길 때 범위 탓인지 가리는 데 쓴다.
   const straight = distMeters(origin, dest);
-  const box = padBBox(bboxOfPoints([origin, dest]), Math.max(400, straight * 0.45));
+  const padM = Number(url.searchParams.get("pad")) || Math.max(400, straight * 0.45);
+  const box = padBBox(bboxOfPoints([origin, dest]), padM);
   const base = `${url.protocol}//${url.host}`;
   const res = await fetch(
     `${base}/api/osm?bbox=${[box.minLng, box.minLat, box.maxLng, box.maxLat].join(",")}`

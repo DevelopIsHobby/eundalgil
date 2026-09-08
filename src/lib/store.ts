@@ -40,7 +40,7 @@ type State = {
   dataLoading: boolean;
   dataError: string | null;
 
-  /** 이동 수단 조합별로 "그늘로 추천 / 최단" 두 벌씩 */
+  /** 이동 수단 조합별로 "그늘 우선 / 최단" 두 벌씩 */
   plans: PlanPair[];
   planIndex: number;
   planStyle: PlanStyle;

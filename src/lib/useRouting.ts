@@ -63,15 +63,24 @@ function contextOf(
   return { bbox, graph };
 }
 
-/** 두 점을 모두 덮는 그래프를 골라 걷는 길을 낸다. 없으면 직선으로 어림잡는다. */
+/** 정류장 바로 앞처럼 짧은 틈만 직선으로 메운다 */
+const STRAIGHT_GAP_M = 120;
+
+/**
+ * 두 점을 모두 덮는 그래프를 골라 걷는 길을 낸다.
+ *
+ * 길을 못 찾으면 **null 이다.** 예전에는 직선으로 이어 버렸는데, 상도동 ↔ 흑석동처럼
+ * 차도 터널로만 연결된 구간에서 "터널을 가로질러 16분 걷기" 라는 없는 길이 만들어졌다.
+ * 정류장 코앞의 짧은 틈만 직선으로 메운다.
+ */
 function makeWalk(ctxs: Ctx[], weights: RouteWeights): WalkFn {
-  return (a: LngLat, b: LngLat): RouteResult => {
+  return (a: LngLat, b: LngLat): RouteResult | null => {
     for (const c of ctxs) {
       if (!bboxContains(c.bbox, a) || !bboxContains(c.bbox, b)) continue;
       const r = routeBetween(c.graph, a, b, weights);
       if (r) return r;
     }
-    return straightRoute(a, b);
+    return distMeters(a, b) <= STRAIGHT_GAP_M ? straightRoute(a, b) : null;
   };
 }
 
@@ -110,7 +119,7 @@ export function useRouting() {
       const sun = getSunState(new Date(timeMs), mid);
       const night = !sun.isDay;
       const weights = weightsFromPrefs(prefs, sun.isDay);
-      const preferLabel = night && prefs.nightSafety ? "밤길 추천" : "그늘로 추천";
+      const preferLabel = night && prefs.nightSafety ? "밤길 우선" : "그늘 우선";
 
       const wantTransit = straight >= MIN_TRANSIT_M;
       const wantWalk = straight <= MAX_WALK_M;
@@ -161,6 +170,7 @@ export function useRouting() {
 
         const pairs: PlanPair[] = [];
         const notices: string[] = [];
+        let walkPair: PlanPair | null = null;
         let planError: string | null = null;
 
         /*
@@ -188,9 +198,12 @@ export function useRouting() {
           if (routes.length) {
             const fast = routes.find((r) => r.id === "fast") ?? routes[0];
             const pref = routes.find((r) => r.id === "shade") ?? fast;
-            pairs.push({ shade: buildWalkPlan(pref, meta), fast: buildWalkPlan(fast, meta) });
+            walkPair = { shade: buildWalkPlan(pref, meta), fast: buildWalkPlan(fast, meta) };
+            pairs.push(walkPair);
           } else if (error) {
             planError = error;
+            // 대중교통 후보가 있으면 화면은 그쪽을 보여 주므로, 왜 도보가 없는지 따로 알린다
+            notices.push(`걸어서 이어지는 길을 찾지 못했어요. ${error}`);
           }
         }
 
@@ -201,16 +214,37 @@ export function useRouting() {
           } else {
             const candidates = planTransit(transit, origin.p, destination.p, 4);
             if (!candidates.length) {
+              // 버스가 한 노선도 없으면 "노선이 없다" 가 아니라 "데이터가 없다" 가 맞는 설명이다
+              const hasBus = transit.patterns.some((p) => p.mode === "bus");
               notices.push(
-                "이 구간을 잇는 노선을 찾지 못했어요. (OpenStreetMap 에 등록된 노선 기준)"
+                hasBus
+                  ? "이 구간을 잇는 노선을 찾지 못했어요. (OpenStreetMap 에 등록된 노선 기준)"
+                  : "이 지역 버스·마을버스 노선은 OpenStreetMap 에 등록돼 있지 않아 지하철만 봅니다."
               );
             }
+            let dropped = 0;
             for (const cand of candidates) {
               const base = { ...meta, origin: origin.p, destination: destination.p };
-              pairs.push({
-                shade: buildTransitPlan(cand, { ...base, style: "shade", walk: shadeWalk }),
-                fast: buildTransitPlan(cand, { ...base, style: "fast", walk: fastWalk }),
-              });
+              const shade = buildTransitPlan(cand, { ...base, style: "shade", walk: shadeWalk });
+              const fast = buildTransitPlan(cand, { ...base, style: "fast", walk: fastWalk });
+              // 정류장까지 걸어갈 길이 없는 조합은 버린다
+              if (!shade || !fast) {
+                dropped++;
+                continue;
+              }
+              /*
+               * 걷는 것보다 느린 대중교통은 안내할 이유가 없다.
+               * 후보를 고를 때는 도보를 직선으로 어림잡으므로, 실제 길을 다 계산한
+               * 지금에서야 이 비교가 가능하다.
+               */
+              if (walkPair && fast.seconds > walkPair.fast.seconds * 1.15) {
+                dropped++;
+                continue;
+              }
+              pairs.push({ shade, fast });
+            }
+            if (dropped && pairs.length <= 1) {
+              notices.push("정류장까지 걷는 길이 없거나 걷는 편이 빨라, 일부 노선은 뺐어요.");
             }
           }
         }

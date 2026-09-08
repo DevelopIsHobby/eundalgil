@@ -52,7 +52,12 @@ export type Plan = {
   summary: string;
 };
 
-export type WalkFn = (a: LngLat, b: LngLat) => RouteResult;
+/**
+ * 두 점 사이를 걷는 길. **못 찾으면 null 이다.**
+ * 예전에는 직선으로 이어 버렸는데, 그러면 상도터널처럼 사람이 걸어서 지날 수 없는 곳을
+ * "16분 걷기" 라고 우기는 안내가 나왔다. 없으면 그 여정을 통째로 버리는 편이 옳다.
+ */
+export type WalkFn = (a: LngLat, b: LngLat) => RouteResult | null;
 
 function walkStats(legs: Leg[]) {
   let meters = 0;
@@ -117,14 +122,16 @@ export function buildTransitPlan(
     style: PlanStyle;
     walk: WalkFn;
   }
-): Plan {
+): Plan | null {
   const legs: Leg[] = [];
   let clock = opts.startMs;
   let cursor = opts.origin;
   let cursorName = opts.originName;
 
+  /** 걷는 길이 없으면 false — 부르는 쪽이 이 여정을 버린다 */
   const pushWalk = (to: LngLat, toName: string) => {
     const route = opts.walk(cursor, to);
+    if (!route) return false;
     if (route.distance >= 15) {
       legs.push({
         type: "walk",
@@ -138,10 +145,11 @@ export function buildTransitPlan(
     }
     cursor = to;
     cursorName = toName;
+    return true;
   };
 
-  cand.rides.forEach((ride: RideSpec) => {
-    pushWalk(ride.from.p, ride.from.name);
+  for (const ride of cand.rides as RideSpec[]) {
+    if (!pushWalk(ride.from.p, ride.from.name)) return null;
     const arriveMs = clock;
     const boardMs = arriveMs + ride.waitSec * 1000;
     legs.push({
@@ -154,9 +162,9 @@ export function buildTransitPlan(
     clock = boardMs + ride.rideSec * 1000;
     cursor = ride.to.p;
     cursorName = ride.to.name;
-  });
+  }
 
-  pushWalk(opts.destination, opts.destName);
+  if (!pushWalk(opts.destination, opts.destName)) return null;
 
   const { meters, shade } = walkStats(legs);
   const fare = cand.rides.reduce((acc, r) => Math.max(acc, MODE_FARE[r.pattern.mode]), 0);
@@ -177,7 +185,7 @@ export function buildTransitPlan(
   };
 }
 
-/** 같은 이동 수단 조합의 "그늘로 추천" / "최단" 두 벌 */
+/** 같은 이동 수단 조합의 "그늘 우선" / "최단" 두 벌 */
 export type PlanPair = { shade: Plan; fast: Plan };
 
 export function planLabel(plan: Plan) {

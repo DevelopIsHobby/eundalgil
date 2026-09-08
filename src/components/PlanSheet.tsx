@@ -220,7 +220,7 @@ export default function PlanSheet() {
             <div className="flex items-start justify-between gap-2">
               <div>
                 <p className="text-[13px] font-bold text-brand">
-                  {planStyle === "shade" ? "그늘로 추천" : "최단"}
+                  {planStyle === "shade" ? "그늘 우선" : "최단"}
                 </p>
                 <div className="flex items-baseline gap-2">
                   <span className="text-[30px] font-extrabold leading-tight tabular-nums">
@@ -240,7 +240,7 @@ export default function PlanSheet() {
                       planStyle === "shade" ? "bg-brand text-white" : "text-ink-500"
                     }`}
                   >
-                    그늘로
+                    그늘
                   </button>
                   <button
                     onClick={() => setPlanStyle("fast")}

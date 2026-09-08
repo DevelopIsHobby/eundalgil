@@ -37,9 +37,9 @@ export const DEFAULT_PREFS: Prefs = {
 
 export const PREF_OPTIONS = {
   sun: [
-    { id: "sun", label: "볕으로" },
+    { id: "sun", label: "볕 쪽" },
     { id: "balanced", label: "균형" },
-    { id: "shade", label: "그늘로" },
+    { id: "shade", label: "그늘 쪽" },
   ],
   hill: [
     { id: "avoid", label: "피할래요" },

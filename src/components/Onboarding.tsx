@@ -22,7 +22,7 @@ const FEATURES = [
   { icon: <IconLeaf />, label: "시간대별 도보 그늘", tone: "bg-brand-soft text-brand" },
   { icon: <IconBus />, label: "대중교통 전 구간 안내", tone: "bg-[#EAF1FF] text-route-fast" },
   { icon: <IconSun />, label: "햇빛 적은 자리 추천", tone: "bg-[#FFF3E0] text-sun" },
-  { icon: <IconTransfer />, label: "환승 도보도 그늘로", tone: "bg-[#F1ECFF] text-route-night" },
+  { icon: <IconTransfer />, label: "환승 도보도 그늘 우선", tone: "bg-[#F1ECFF] text-route-night" },
   { icon: <IconShield />, label: "야간 방범시설 많은 길", tone: "bg-[#FFF7DC] text-[#C99700]" },
 ];
 

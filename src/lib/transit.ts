@@ -85,6 +85,15 @@ const MAX_TRANSFER_HUBS = 40;
  * 한두 정류장을 위해 기다렸다 타는 안내는 실제로는 걷느니만 못하다.
  */
 const MIN_RIDE_M = 450;
+/**
+ * 타고 가서 실제로 가까워져야 한다. 승차·하차 정류장의 목적지까지 거리 차이가
+ * 주행 거리의 이만큼은 돼야 후보로 인정한다.
+ * (이게 없으면 목적지 반대쪽으로 한 정거장 갔다가 되돌아 걷는 경로가 만들어진다)
+ */
+const MIN_PROGRESS_RATIO = 0.35;
+const MIN_PROGRESS_M = 250;
+/** 접근·하차 도보를 합쳐 이보다 멀면, 타는 것보다 걷는 게 낫다 */
+const walkBudget = (straight: number) => Math.max(700, straight * 1.15);
 
 export async function fetchTransit(
   origin: LngLat,
@@ -207,6 +216,15 @@ export function planTransit(
     (boardings.get(s.id) ?? []).map((b) => ({ board: b, accessMeters: d }))
   );
 
+  /** 타는 구간이 목적지 쪽으로 얼마나 데려다주는지 (m) */
+  const progressOf = (ride: RideSpec) =>
+    distMeters(ride.from.p, destination) - distMeters(ride.to.p, destination);
+
+  const worthRiding = (ride: RideSpec) => {
+    const progress = progressOf(ride);
+    return progress >= MIN_PROGRESS_M && progress >= ride.distance * MIN_PROGRESS_RATIO;
+  };
+
   // 1) 직행
   for (const { board, accessMeters } of seeds) {
     const { pattern, index } = board;
@@ -215,8 +233,10 @@ export function planTransit(
       if (egress === undefined) continue;
       const ride = rideOf(pattern, stopsById, index, j);
       if (!ride) continue;
-      // 걸어가는 편이 나은 조합은 버린다
+      // 걸어가는 편이 나은 조합, 목적지 쪽으로 가지 않는 조합은 버린다
       if (ride.distance < straight * 0.35) continue;
+      if (!worthRiding(ride)) continue;
+      if (accessMeters + egress > walkBudget(straight)) continue;
       out.push({
         id: `${pattern.id}:${index}-${j}`,
         rides: [ride],
@@ -245,6 +265,8 @@ export function planTransit(
       if (!stop) continue;
       const ride = rideOf(pattern, stopsById, index, j);
       if (!ride) continue;
+      // 첫 구간도 목적지 쪽으로 가야 한다 (되돌아가는 환승은 여기서 걸러진다)
+      if (progressOf(ride) < MIN_PROGRESS_M) continue;
       const cost = walkSec(accessMeters) + ride.waitSec + ride.rideSec;
       if (cost > MAX_FIRST_LEG_S) continue;
       const prev = reachAll.get(stop.id);
@@ -278,6 +300,8 @@ export function planTransit(
           if (egress === undefined) continue;
           const second = rideOf(board.pattern, stopsById, board.index, j);
           if (!second) continue;
+          if (!worthRiding(second)) continue;
+          if (first.accessMeters + egress > walkBudget(straight)) continue;
           out.push({
             id: `${first.ride.pattern.id}>${board.pattern.id}:${stopId}`,
             rides: [first.ride, second],
