@@ -64,6 +64,8 @@ function rideColor(leg: RideLeg) {
 
 function WalkLegRow({ leg }: { leg: WalkLeg }) {
   const pct = Math.round(leg.route.shadeRatio * 100);
+  // 같은 이름의 정류장 사이를 걷는 건 환승이다 ("중대후문입구 → 중대후문입구" 로 보이면 이상하다)
+  const transfer = leg.from === leg.to;
   return (
     <li className="flex gap-3">
       <div className="flex w-11 shrink-0 flex-col items-center">
@@ -76,11 +78,11 @@ function WalkLegRow({ leg }: { leg: WalkLeg }) {
             <IconWalk className="h-[17px] w-[17px]" />
           </span>
           <p className="text-[15px] font-bold">
-            {leg.preferred ? "그늘 우선으로 걷기" : "빠른 길로 걷기"}
+            {transfer ? "환승 정류장까지 걷기" : leg.preferred ? "그늘 우선으로 걷기" : "빠른 길로 걷기"}
           </p>
         </div>
         <p className="mt-1.5 text-[13px] text-ink-500">
-          {leg.from} → {leg.to}
+          {transfer ? leg.to : `${leg.from} → ${leg.to}`}
         </p>
         <p className="mt-0.5 text-[13px] text-ink-400 tabular-nums">
           {formatDuration(leg.route.duration)} · {formatDistance(leg.route.distance)}
@@ -134,7 +136,18 @@ function RideLegRow({ leg }: { leg: RideLeg }) {
           >
             {ride.pattern.ref || ride.pattern.name}
           </span>
+          {ride.altRefs?.map((ref) => (
+            <span
+              key={ref}
+              className="rounded-md border px-1.5 py-0.5 text-[12px] font-bold"
+              style={{ borderColor: color, color }}
+              title="같은 구간을 다니는 다른 노선"
+            >
+              {ref}
+            </span>
+          ))}
           <span className="text-[12px] text-ink-400">
+            {ride.altRefs?.length ? "중 먼저 오는 것 · " : ""}
             {MODE_LABEL[ride.pattern.mode]}
             {ride.pattern.headsign ? ` · ${ride.pattern.headsign} 방면` : ""}
           </span>

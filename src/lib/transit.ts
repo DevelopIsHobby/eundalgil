@@ -117,6 +117,8 @@ export async function fetchTransit(
 
 export type RideSpec = {
   pattern: TransitPattern;
+  /** 같은 정류장 사이를 오가는 다른 노선 번호 — 먼저 오는 걸 타면 된다 */
+  altRefs?: string[];
   from: TransitStop;
   to: TransitStop;
   /** 타는 정류장을 뺀 정차 수 */
@@ -325,15 +327,26 @@ export function planTransit(
 
   out.sort((a, b) => a.estimateSec - b.estimateSec);
 
-  // 같은 노선 조합은 하나만 남긴다
-  const seen = new Set<string>();
-  const picked: TransitCandidate[] = [];
+  /*
+   * 타고 내리는 정류장이 같으면 사용자에게는 같은 여정이다 — 노선 번호만 다를 뿐이다.
+   * (상도4동약수맨션 → 중대후문입구 를 동작08·동작10·동작21 이 함께 다닌다)
+   * 하나만 남기고 나머지는 "이것도 탈 수 있다" 로 붙인다.
+   */
+  const seen = new Map<string, TransitCandidate>();
   for (const c of out) {
-    const key = c.rides.map((r) => `${r.pattern.mode}${r.pattern.ref || r.pattern.name}`).join(">");
-    if (seen.has(key)) continue;
-    seen.add(key);
-    picked.push(c);
-    if (picked.length >= limit) break;
+    const key = c.rides.map((r) => `${r.from.id}>${r.to.id}`).join("|");
+    const prev = seen.get(key);
+    if (!prev) {
+      if (seen.size >= limit) continue;
+      seen.set(key, c);
+      continue;
+    }
+    prev.rides.forEach((ride, i) => {
+      const ref = c.rides[i]?.pattern.ref;
+      if (!ref || ref === ride.pattern.ref) return;
+      ride.altRefs ??= [];
+      if (!ride.altRefs.includes(ref) && ride.altRefs.length < 4) ride.altRefs.push(ref);
+    });
   }
-  return picked;
+  return [...seen.values()];
 }

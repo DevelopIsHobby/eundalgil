@@ -23,7 +23,10 @@ const MAX_ROUTES = 48;
 const MAX_STOPS_PER_END = 12;
 
 export function seoulKey() {
-  return (process.env.SEOUL_BUS_KEY ?? process.env.TAGO_KEY ?? "").trim();
+  // `??` 로 이으면 SEOUL_BUS_KEY 가 **빈 문자열**일 때 TAGO 키로 넘어가지 않는다.
+  // .env 에 이름만 적어 둔 경우가 그래서, 값이 비었으면 없는 것으로 친다.
+  const own = (process.env.SEOUL_BUS_KEY ?? "").trim();
+  return own || (process.env.TAGO_KEY ?? "").trim();
 }
 
 type Cached<T> = { at: number; value: T };
