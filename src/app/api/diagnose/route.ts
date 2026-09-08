@@ -12,12 +12,19 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   const t0 = Date.now();
   const url = new URL(req.url);
-  const origin: LngLat = [126.9769, 37.5759]; // 광화문
-  const dest: LngLat = [126.9895, 37.5704];   // 을지로입구
+  // from/to 를 주면 그 구간을, 없으면 광화문 → 을지로입구를 본다. (형식: lng,lat)
+  const parse = (v: string | null, fallback: LngLat): LngLat => {
+    const [lng, lat] = (v ?? "").split(",").map(Number);
+    return Number.isFinite(lng) && Number.isFinite(lat) ? [lng, lat] : fallback;
+  };
+  const origin = parse(url.searchParams.get("from"), [126.9769, 37.5759]);
+  const dest = parse(url.searchParams.get("to"), [126.9895, 37.5704]);
   const when = new Date();
   when.setHours(Number(url.searchParams.get("h") ?? 15), 0, 0, 0);
 
-  const box = padBBox(bboxOfPoints([origin, dest]), 500);
+  // 앱(useRouting)과 같은 범위를 써야 여기서 본 결과가 화면과 일치한다
+  const straight = distMeters(origin, dest);
+  const box = padBBox(bboxOfPoints([origin, dest]), Math.max(400, straight * 0.45));
   const base = `${url.protocol}//${url.host}`;
   const res = await fetch(
     `${base}/api/osm?bbox=${[box.minLng, box.minLat, box.maxLng, box.maxLat].join(",")}`
@@ -36,7 +43,10 @@ export async function GET(req: Request) {
   applyShade(graph, idx);
   const tGraph = Date.now();
 
-  const r = findRoutes(graph, origin, dest, { shadeWeight: 1.4, avoidSteps: false });
+  // 화면의 설정을 그대로 재현할 수 있게 열어 둔다
+  const shadeWeight = Number(url.searchParams.get("shade") ?? 1.4);
+  const avoidSteps = url.searchParams.get("avoidSteps") === "1";
+  const r = findRoutes(graph, origin, dest, { shadeWeight, avoidSteps });
   const tRoute = Date.now();
 
   return NextResponse.json({
@@ -50,6 +60,8 @@ export async function GET(req: Request) {
       graphNodes: graph.nodes.length,
       graphEdges: graph.adj.reduce((a, b) => a + b.length, 0) / 2,
     },
+    // 고도를 실제로 받았는지 — false 면 오르막이 비용에 안 들어간 것이다
+    elevationOk: bundle.ways.some((w) => w.elev && w.elev.length > 0),
     sun: {
       altitude: +sun.altitudeDeg.toFixed(1),
       azimuth: +sun.azimuthDeg.toFixed(1),
@@ -62,6 +74,12 @@ export async function GET(req: Request) {
       shade: +(x.shadeRatio * 100).toFixed(1),
       segments: x.segments.length,
       steps: Math.round(x.stepsMeters),
+      crossings: x.crossings,
+      ascent: x.ascent,
+      // "왜 이런 길로 가지?" 를 바로 볼 수 있게 지나는 길을 나열한다
+      streets: x.streets.filter((st) => st.meters >= 5).map((st) => `${st.name} (${st.kind}) ${st.meters}m`),
+      // 고도·경사를 따로 재 보려고 좌표를 성기게 실어 준다
+      path: x.path.filter((_, i) => i % 5 === 0 || i === x.path.length - 1),
     })),
     error: r.error ?? null,
     msec: { fetch: tFetch - t0, shadow: tShadow - tFetch, graph: tGraph - tShadow, route: tRoute - tGraph },

@@ -21,3 +21,7 @@ next-env.d.ts
 .DS_Store
 Thumbs.db
 desktop.ini
+
+
+# 로컬 개발 도구 설정
+/.claude/

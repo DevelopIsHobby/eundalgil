@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { useApp } from "@/lib/store";
 import { getMap } from "./MapView";
-import { IconLayers, IconLocate, IconTree } from "./icons";
+import { hasVWorld, basemapLabel } from "@/lib/basemap";
+import { IconCompass, IconLayers, IconLocate, IconTree } from "./icons";
 
 function FloatBtn({
   active,
@@ -31,8 +32,14 @@ function FloatBtn({
 }
 
 export default function MapControls({ bottom }: { bottom: number }) {
-  const { showShadow, showTrees, toggle, setCenter, showToast } = useApp();
+  const { showShadow, showTrees, toggle, setCenter, showToast, basemap, setBasemap } = useApp();
   const [locating, setLocating] = useState(false);
+
+  const swapBasemap = () => {
+    const next = basemap === "vworld" ? "openfreemap" : "vworld";
+    setBasemap(next);
+    showToast(`${basemapLabel(next)}로 바꿨습니다.`);
+  };
 
   const locate = () => {
     if (!navigator.geolocation) {
@@ -43,9 +50,11 @@ export default function MapControls({ bottom }: { bottom: number }) {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         setLocating(false);
-        setCenter([pos.coords.longitude, pos.coords.latitude], 17);
+        const p: [number, number] = [pos.coords.longitude, pos.coords.latitude];
+        // 지도가 멈추면 store.center 는 알아서 따라온다 (MapView 의 onIdle)
         const map = getMap();
-        if (map) map.setCenter(new naver.maps.LatLng(pos.coords.latitude, pos.coords.longitude));
+        if (map) map.easeTo({ center: p, zoom: 16, duration: 500 });
+        else setCenter(p, 16);
       },
       () => {
         setLocating(false);
@@ -66,6 +75,15 @@ export default function MapControls({ bottom }: { bottom: number }) {
       <FloatBtn active={showTrees} label="가로수 그늘" onClick={() => toggle("showTrees")}>
         <IconTree />
       </FloatBtn>
+      {hasVWorld && (
+        <FloatBtn
+          active={basemap === "vworld"}
+          label={`배경지도 전환 — 지금은 ${basemapLabel(basemap)}`}
+          onClick={swapBasemap}
+        >
+          <IconCompass />
+        </FloatBtn>
+      )}
       <FloatBtn label="현재 위치" onClick={locate}>
         <IconLocate className={locating ? "animate-pulse" : ""} />
       </FloatBtn>

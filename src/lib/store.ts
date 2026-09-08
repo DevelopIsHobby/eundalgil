@@ -5,6 +5,7 @@ import type { LngLat } from "./geo";
 import type { OsmBundle } from "./osm";
 import type { RouteOption } from "./router";
 import { DEFAULT_CENTER, DEFAULT_ZOOM, ShadePresetId } from "./config";
+import type { BasemapId } from "./basemap";
 
 export type Place = { name: string; address?: string; p: LngLat };
 
@@ -14,6 +15,8 @@ type State = {
   screen: Screen;
   center: LngLat;
   zoom: number;
+  /** 배경지도 종류 — 브이월드 키가 없으면 openfreemap 하나만 쓴다 */
+  basemap: BasemapId;
 
   /** 기준 시각 (ms) */
   timeMs: number;
@@ -42,6 +45,7 @@ type State = {
 type Actions = {
   setScreen: (s: Screen) => void;
   setCenter: (c: LngLat, zoom?: number) => void;
+  setBasemap: (id: BasemapId) => void;
   setTime: (ms: number, follow?: boolean) => void;
   setOrigin: (p: Place | null) => void;
   setDestination: (p: Place | null) => void;
@@ -62,6 +66,7 @@ export const useApp = create<State & Actions>((set, get) => ({
   screen: "browse",
   center: DEFAULT_CENTER,
   zoom: DEFAULT_ZOOM,
+  basemap: "openfreemap",
 
   timeMs: Date.now(),
   followNow: true,
@@ -87,6 +92,7 @@ export const useApp = create<State & Actions>((set, get) => ({
 
   setScreen: (screen) => set({ screen }),
   setCenter: (center, zoom) => set(zoom == null ? { center } : { center, zoom }),
+  setBasemap: (basemap) => set({ basemap }),
   setTime: (timeMs, follow = false) => set({ timeMs, followNow: follow }),
   setOrigin: (origin) => set({ origin }),
   setDestination: (destination) => set({ destination }),

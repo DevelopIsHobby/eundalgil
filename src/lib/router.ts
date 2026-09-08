@@ -11,6 +11,8 @@ export type Edge = {
   covered: boolean;
   /** 0~1 그늘 비율 (applyShade 이후 채워짐) */
   shade: number;
+  /** 이 방향으로 갈 때 올라가는 높이(m). 내리막이면 0 */
+  climb: number;
   name?: string;
 };
 
@@ -33,13 +35,36 @@ const KIND_SPEED: Record<WalkWay["kind"], number> = {
   crossing: 0.9,
   steps: 0.45,
   road: 0.95, // 차도 갓길
+  // 램프는 갓길도 신호도 없는 차량 전용 갈래길이다. 지날 수는 있지만 마지막 수단이 되게 한다
+  ramp: 0.6,
+  /*
+   * 산길(포장 안 된 path·track). 흙길·급경사·가로등 없음이 겹친다.
+   * 거리로만 보면 언제나 지름길이라, 0.5 정도로는 200m 쯤 돌아가는 정상적인 길에 계속 이겼다.
+   * 도심 보행 경로로 쓸 길이 아니므로 크게 깎는다. 그래도 아주 막지는 않는다 —
+   * 산길 말고는 북쪽으로 이어지는 길이 없는 동네가 실제로 있다.
+   */
+  trail: 0.15,
 };
 
 /** 횡단보도 한 곳당 평균 대기 시간(초) */
 const CROSSING_WAIT_S = 8;
 
+/**
+ * 1m 올라갈 때 더 드는 시간(초). 등산에서 쓰는 네이스미스 규칙(600m 오르는 데 1시간)을
+ * 그대로 가져왔다. 내리막은 더하지 않는다 — 빨라지긴 해도 무릎이 힘든 건 별개라 0으로 둔다.
+ */
+const ASCENT_SEC_PER_M = 3600 / 600;
+
+/**
+ * 기준 보행 속도. 1.25m/s(4.5km/h)는 평지를 성큼성큼 걷는 속도라 국내 지도 앱보다
+ * 3분쯤 짧게 나왔다. (상도동 855m 구간: 우리 13분 / 네이버 15~16분)
+ * 우리는 경사를 비용에 넣지 않으므로, 오르내림이 섞인 실제 보행을 평균으로 흡수하는
+ * 1.0m/s(3.6km/h)로 잡아 국내 앱 표기와 맞춘다.
+ */
+const WALK_SPEED_MPS = 1.0;
+
 /** 가장 빠른 노면 기준 1m 당 최소 소요 시간 — A* 휴리스틱이 실제 비용을 넘지 않게 하는 데 쓴다 */
-const MIN_SEC_PER_M = 1 / (1.25 * 1.05);
+const MIN_SEC_PER_M = 1 / (WALK_SPEED_MPS * Math.max(...Object.values(KIND_SPEED)));
 
 export function buildGraph(ways: WalkWay[], refLat = 37.5, cellMeters = 80): Graph {
   const index = new Map<string, number>();
@@ -67,8 +92,10 @@ export function buildGraph(ways: WalkWay[], refLat = 37.5, cellMeters = 80): Gra
       const ib = idOf(b);
       if (ia === ib) continue;
       const base = { length: len, kind: w.kind, covered: !!w.covered, shade: 0, name: w.name };
-      adj[ia].push({ ...base, to: ib, path: [a, b] });
-      adj[ib].push({ ...base, to: ia, path: [b, a] });
+      // 고도 차이는 방향에 따라 한쪽만 오르막이다
+      const rise = w.elev ? w.elev[i] - w.elev[i - 1] : 0;
+      adj[ia].push({ ...base, to: ib, path: [a, b], climb: Math.max(0, rise) });
+      adj[ib].push({ ...base, to: ia, path: [b, a], climb: Math.max(0, -rise) });
     }
   }
 
@@ -163,16 +190,25 @@ export type RouteResult = {
   shadeRatio: number;
   stepsMeters: number;
   crossings: number;
+  /** 총 오르막 높이(m) */
+  ascent: number;
   /** 구간별 그늘 여부 — 지도에 구간 색을 다르게 칠하기 위한 것 */
   segments: { path: LngLat[]; shade: number }[];
+  /**
+   * 지나는 길 목록. "왜 이런 길로 가지?" 를 눈으로 확인하려고 둔다.
+   * (`/api/diagnose` 가 그대로 내려 준다)
+   */
+  streets: { name: string; kind: WalkWay["kind"]; meters: number }[];
 };
-
-const WALK_SPEED_MPS = 1.25; // 약 4.5km/h
 
 /** 간선 하나를 걷는 데 걸리는 실제 시간(초) */
 function edgeTime(e: Edge) {
   const speed = WALK_SPEED_MPS * (KIND_SPEED[e.kind] ?? 1);
-  return e.length / speed + (e.kind === "crossing" ? CROSSING_WAIT_S : 0);
+  return (
+    e.length / speed +
+    e.climb * ASCENT_SEC_PER_M +
+    (e.kind === "crossing" ? CROSSING_WAIT_S : 0)
+  );
 }
 
 class MinHeap {
@@ -291,7 +327,9 @@ function toResult(edges: Edge[], start: LngLat, end: LngLat): RouteResult {
   let seconds = 0;
   let stepsMeters = 0;
   let crossings = 0;
+  let ascent = 0;
   let shadeWeighted = 0;
+  const streets: RouteResult["streets"] = [];
 
   for (const e of edges) {
     for (let i = 1; i < e.path.length; i++) path.push(e.path[i]);
@@ -300,6 +338,13 @@ function toResult(edges: Edge[], start: LngLat, end: LngLat): RouteResult {
     shadeWeighted += e.shade * e.length;
     if (e.kind === "steps") stepsMeters += e.length;
     if (e.kind === "crossing") crossings += 1;
+    ascent += e.climb;
+
+    // 같은 길이 이어지면 한 줄로 합친다
+    const label = e.name ?? "(이름 없음)";
+    const tail = streets[streets.length - 1];
+    if (tail && tail.name === label && tail.kind === e.kind) tail.meters += e.length;
+    else streets.push({ name: label, kind: e.kind, meters: e.length });
 
     const isShady = e.shade >= 0.5;
     const last = segments[segments.length - 1];
@@ -324,7 +369,9 @@ function toResult(edges: Edge[], start: LngLat, end: LngLat): RouteResult {
     shadeRatio: distance > 0 ? shadeWeighted / distance : 0,
     stepsMeters,
     crossings,
+    ascent: Math.round(ascent),
     segments,
+    streets: streets.map((x) => ({ ...x, meters: Math.round(x.meters) })),
   };
 }
 

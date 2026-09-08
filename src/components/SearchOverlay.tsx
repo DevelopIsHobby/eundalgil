@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PlaceHit } from "@/app/api/search/route";
 import { useDebounced } from "@/lib/useDebounced";
-import type { Place } from "@/lib/store";
+import { useApp, type Place } from "@/lib/store";
 import { IconBack, IconClose, IconLocate, IconSearch } from "./icons";
 
 const RECENT_KEY = "eundalgil.recent";
@@ -47,6 +47,8 @@ export default function SearchOverlay({
   const [recent, setRecent] = useState<Place[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounced = useDebounced(q, 300);
+  // 지금 보고 있는 지역의 결과를 먼저 보여 주기 위한 기준점
+  const center = useApp((s) => s.center);
 
   useEffect(() => {
     setRecent(loadRecent());
@@ -62,7 +64,9 @@ export default function SearchOverlay({
     }
     const ctl = new AbortController();
     setLoading(true);
-    fetch(`/api/search?q=${encodeURIComponent(term)}`, { signal: ctl.signal })
+    const url =
+      `/api/search?q=${encodeURIComponent(term)}` + `&lng=${center[0].toFixed(4)}&lat=${center[1].toFixed(4)}`;
+    fetch(url, { signal: ctl.signal })
       .then(async (r) => {
         if (!r.ok) throw new Error(await r.text());
         return r.json();
@@ -76,6 +80,8 @@ export default function SearchOverlay({
       })
       .finally(() => setLoading(false));
     return () => ctl.abort();
+    // 검색창이 떠 있는 동안 지도는 움직이지 않으므로 center 는 다시 부르는 조건에서 뺀다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debounced]);
 
   const pick = (p: Place) => {
@@ -152,10 +158,12 @@ export default function SearchOverlay({
           >
             <div className="min-w-0 flex-1">
               <div className="truncate text-[15px] font-medium">{h.name}</div>
-              <div className="truncate text-[13px] text-ink-500">{h.address}</div>
+              {/* 주소가 없는 결과(일부 지하철역 등)에 빈 줄이 남지 않게 한다 */}
+              {h.address && <div className="truncate text-[13px] text-ink-500">{h.address}</div>}
             </div>
+            {/* 브이월드 분류는 "제2종근린생활시설" 처럼 길어서 이름을 밀어낼 수 있다 */}
             {h.category && (
-              <span className="mt-0.5 shrink-0 rounded bg-[#F2F4F6] px-1.5 py-0.5 text-[11px] text-ink-500">
+              <span className="mt-0.5 max-w-[35%] shrink-0 truncate rounded bg-[#F2F4F6] px-1.5 py-0.5 text-[11px] text-ink-500">
                 {h.category}
               </span>
             )}

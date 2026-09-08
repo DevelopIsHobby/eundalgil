@@ -26,10 +26,21 @@ body {
   box-sizing: border-box;
 }
 
-/* 네이버 지도 로고/저작권 컨트롤이 하단 시트에 가리지 않도록 살짝 올림 */
-.map-root .nmap_copyright,
-.map-root div[class*="map_copyright"] {
-  bottom: 4px !important;
+/* 저작권 표기가 하단 시트에 가리지 않도록 살짝 올리고 작게 줄인다 */
+.map-root .maplibregl-ctrl-bottom-right,
+.map-root .maplibregl-ctrl-bottom-left {
+  z-index: 1;
+}
+.map-root .maplibregl-ctrl-attrib {
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.7);
+}
+.map-root .maplibregl-ctrl-attrib a {
+  color: #6b7684;
+}
+/* 지도 캔버스에 포커스 링이 생기지 않게 */
+.map-root .maplibregl-canvas:focus {
+  outline: none;
 }
 
 .no-scrollbar::-webkit-scrollbar {

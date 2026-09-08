@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import { SHADE_PRESETS } from "@/lib/config";
 import { useApp } from "@/lib/store";
 import { formatDistance, formatDuration, type RouteOption } from "@/lib/router";
@@ -88,17 +90,35 @@ function RouteCard({
 export default function RouteSheet() {
   const { routes, selectedRoute, selectRoute, shadePreset, setShadePreset, routing, routeError } =
     useApp();
+  /**
+   * 시트를 다 펼치면 작은 화면에서 지도가 거의 안 남는다.
+   * 기본은 접어서 고른 경로 한 장만 보여 주고, 손잡이를 눌러 나머지를 편다.
+   * 시트가 접히면 그만큼 지도 여백이 줄어 경로도 다시 넓게 잡힌다. (page.tsx 의 bottomInset)
+   */
+  const [expanded, setExpanded] = useState(false);
 
   const bestId =
     routes.length > 1
       ? routes.reduce((a, b) => (b.shadeRatio > a.shadeRatio ? b : a)).id
       : routes[0]?.id;
 
+  // 접었을 때는 고른 경로만 (없으면 첫 번째)
+  const shown = expanded ? routes : routes.filter((r) => r.id === (selectedRoute ?? routes[0]?.id));
+  const hiddenCount = routes.length - shown.length;
+
   return (
     <div className="pointer-events-auto rounded-t-sheet bg-white pb-2 shadow-sheet">
-      <div className="flex justify-center pb-2 pt-2">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        aria-label={expanded ? "경로 목록 접기" : "경로 목록 펼치기"}
+        className="flex w-full flex-col items-center gap-1 pb-2 pt-2"
+      >
         <span className="sheet-handle" />
-      </div>
+        {!expanded && hiddenCount > 0 && (
+          <span className="text-[11px] text-ink-400">다른 경로 {hiddenCount}개 더 보기</span>
+        )}
+      </button>
 
       <div className="no-scrollbar flex gap-1.5 overflow-x-auto px-4 pb-3">
         {SHADE_PRESETS.map((p) => (
@@ -116,7 +136,9 @@ export default function RouteSheet() {
         ))}
       </div>
 
-      <div className="max-h-[42vh] space-y-2 overflow-y-auto px-4 pb-3">
+      <div
+        className={`space-y-2 px-4 pb-3 ${expanded ? "max-h-[42vh] overflow-y-auto" : ""}`}
+      >
         {routing && <div className="py-6 text-center text-sm text-ink-400">경로를 계산하고 있어요…</div>}
 
         {!routing && routeError && (
@@ -126,7 +148,7 @@ export default function RouteSheet() {
         )}
 
         {!routing &&
-          routes.map((r) => (
+          shown.map((r) => (
             <RouteCard
               key={r.id}
               route={r}
@@ -136,14 +158,19 @@ export default function RouteSheet() {
             />
           ))}
 
-        {!routing && !routeError && routes.length === 1 && (
+        {!routing && !routeError && expanded && routes.length === 1 && (
           <p className="px-1 pt-1 text-[12px] leading-relaxed text-ink-400">
             이 시각에는 우회해도 그늘이 더 늘지 않아 최단 경로 하나만 보여드려요.
           </p>
         )}
       </div>
 
-      <div className="flex items-center gap-3 border-t border-line px-4 pt-2.5 text-[11px] text-ink-400">
+      {/* 접었을 때는 범례까지 넣으면 지도가 더 줄어든다 */}
+      <div
+        className={`items-center gap-3 border-t border-line px-4 pt-2.5 text-[11px] text-ink-400 ${
+          expanded ? "flex" : "hidden"
+        }`}
+      >
         <span className="flex items-center gap-1">
           <span className="h-[3px] w-4 rounded-full bg-route-shade" /> 그늘 구간
         </span>

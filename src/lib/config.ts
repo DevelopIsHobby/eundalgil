@@ -10,10 +10,15 @@ export const BRAND = {
 
 /** 기본 지도 중심 (서울시청) */
 export const DEFAULT_CENTER: LngLat = [126.9784, 37.5666];
-export const DEFAULT_ZOOM = 16;
+
+/**
+ * MapLibre 의 줌은 512px 타일 기준이라 네이버·구글의 256px 기준보다 한 단계 낮다.
+ * (MapLibre z15 ≒ 네이버 z16) 아래 값들은 모두 MapLibre 기준이다.
+ */
+export const DEFAULT_ZOOM = 15;
 
 /** 데이터를 내려받는 최소 줌 — 이보다 낮으면 범위가 너무 넓어진다 */
-export const MIN_DATA_ZOOM = 15;
+export const MIN_DATA_ZOOM = 14;
 
 /** 지도 이동 시 데이터를 다시 받을지 판단하는 여유 거리(m) */
 export const REFETCH_PAD_M = 250;

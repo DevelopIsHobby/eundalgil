@@ -1,37 +1,59 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import MapView, { getMap } from "@/components/MapView";
 import TopBar from "@/components/TopBar";
-import TimeBar from "@/components/TimeBar";
 import MapControls from "@/components/MapControls";
 import BottomNav from "@/components/BottomNav";
 import RouteHeader from "@/components/RouteHeader";
 import RouteSheet from "@/components/RouteSheet";
+import PlaceCard from "@/components/PlaceCard";
 import SearchOverlay from "@/components/SearchOverlay";
 import Toast from "@/components/Toast";
 import { useApp, type Place } from "@/lib/store";
 import { useRouting } from "@/lib/useRouting";
 import { MIN_DATA_ZOOM } from "@/lib/config";
 
+/**
+ * 시각 막대는 "지금"(Date.now)에서 출발하므로 서버에서 그린 HTML 과 어긋난다.
+ * 그대로 두면 hydration 이 깨지면서 문서 전체가 새로 그려지고, 그때 지도까지 다시 만들어진다.
+ * 클라이언트에서만 그리게 하고 자리만 미리 잡아 둔다.
+ */
+const TimeBar = dynamic(() => import("@/components/TimeBar"), {
+  ssr: false,
+  loading: () => <div className="mx-3 h-[77px] rounded-xl bg-white/95 shadow-card" />,
+});
+
 type Editing = "origin" | "destination" | "browse" | null;
 
 export default function Page() {
   const store = useApp();
   const [editing, setEditing] = useState<Editing>(null);
+  /** 홈에서 검색해 고른 장소 — 출발/도착을 아직 안 정한 상태 */
+  const [picked, setPicked] = useState<Place | null>(null);
   const [bottomInset, setBottomInset] = useState(120);
+  const [topInset, setTopInset] = useState(110);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const topRef = useRef<HTMLDivElement>(null);
 
   useRouting();
 
-  /* 하단 UI 높이를 재서 지도 중심 보정에 쓴다 */
+  /* 상·하단 UI 높이를 재서 지도 여백에 쓴다 */
   useLayoutEffect(() => {
-    const el = bottomRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => setBottomInset(el.offsetHeight));
-    ro.observe(el);
-    setBottomInset(el.offsetHeight);
-    return () => ro.disconnect();
+    const measure = (el: HTMLElement | null, set: (v: number) => void) => {
+      if (!el) return () => {};
+      const ro = new ResizeObserver(() => set(el.offsetHeight));
+      ro.observe(el);
+      set(el.offsetHeight);
+      return () => ro.disconnect();
+    };
+    const offBottom = measure(bottomRef.current, setBottomInset);
+    const offTop = measure(topRef.current, setTopInset);
+    return () => {
+      offBottom();
+      offTop();
+    };
   }, []);
 
   /* 출발·도착이 모두 정해지면 결과 화면으로 */
@@ -43,7 +65,13 @@ export default function Page() {
   }, [origin, destination, screen]);
 
   /* 경로가 나오면 지도에 맞춰 보여준다 */
-  const routeKey = store.routes.map((r) => r.id).join("|");
+  // 경로 id 만 이으면 늘 "fast|shade" 라서, 출발·도착을 바꿔도 값이 그대로다.
+  // 그러면 아래 효과가 다시 돌지 않아 지도가 옛 자리에 남는다. 실제 좌표를 섞는다.
+  const routeKey = [
+    store.origin?.p.join(","),
+    store.destination?.p.join(","),
+    ...store.routes.map((r) => `${r.id}:${Math.round(r.distance)}`),
+  ].join("|");
   useEffect(() => {
     const map = getMap();
     if (!map || !store.routes.length) return;
@@ -59,15 +87,41 @@ export default function Page() {
       minLat = Math.min(minLat, lat);
       maxLat = Math.max(maxLat, lat);
     }
-    map.fitBounds(
-      new naver.maps.LatLngBounds(
-        new naver.maps.LatLng(minLat, minLng),
-        new naver.maps.LatLng(maxLat, maxLng)
-      ),
-      { top: 130, right: 40, bottom: bottomInset + 24, left: 40 }
-    );
+    // 경로 시트가 펼쳐지며 지도 여백이 커지므로 그 값이 정해진 뒤에 맞춘다.
+    // 여백은 MapView 가 정하니 여기서는 지도에 설정된 값을 그대로 받아 쓴다 —
+    // 계산에 쓴 여백과 실제 여백이 다르면 경로가 UI 뒤로 밀린다.
+    const t = setTimeout(() => {
+      map.fitBounds(
+        [
+          [minLng, minLat],
+          [maxLng, maxLat],
+        ],
+        { padding: map.getPadding(), maxZoom: 17, duration: 600 }
+      );
+    }, 80);
+    return () => clearTimeout(t);
+    // 여백이 잇달아 바뀌면 타이머가 취소·재설정되며 마지막 값으로 한 번만 맞춘다
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routeKey]);
+  }, [routeKey, topInset, bottomInset]);
+
+  /**
+   * 고른 지점으로 지도를 옮긴다. 경로가 나오면 곧이어 fitBounds 가 다시 잡아 준다.
+   * store.center 는 건드리지 않는다 — 지도가 멈추면 그쪽에서 알아서 따라온다.
+   * (여기서 같이 쓰면 묵은 idle 과 엇갈려 이동이 취소되던 문제가 있었다)
+   */
+  const goTo = (p: Place) => {
+    const map = getMap();
+    if (!map) {
+      store.setCenter(p.p, 16);
+      return;
+    }
+    /*
+     * 장소를 고르면 화면이 바뀌면서(검색창 닫힘 → 경로 헤더 등장 → 시트 등장) 지도 여백이
+     * 다시 잡힌다. 여백을 바꾸는 setPadding 은 내부적으로 jumpTo → stop() 이라
+     * **막 시작한 이동을 끊어 버린다.** 그래서 여백이 자리잡은 다음에 움직인다.
+     */
+    setTimeout(() => getMap()?.easeTo({ center: p.p, zoom: 16, duration: 500 }), 150);
+  };
 
   const useCurrentPosition = (which: "origin" | "destination") => {
     if (!navigator.geolocation) {
@@ -80,6 +134,7 @@ export default function Page() {
           name: "현재 위치",
           p: [pos.coords.longitude, pos.coords.latitude],
         };
+        goTo(place);
         if (which === "origin") store.setOrigin(place);
         else store.setDestination(place);
         setEditing(null);
@@ -89,12 +144,10 @@ export default function Page() {
   };
 
   const onPick = (p: Place) => {
+    goTo(p);
     if (editing === "browse") {
-      store.setCenter(p.p, 17);
-      const map = getMap();
-      if (map) map.setCenter(new naver.maps.LatLng(p.p[1], p.p[0]));
-      store.setDestination(p);
-      store.setScreen("routeInput");
+      // 홈에서 검색한 건 출발지일 수도 도착지일 수도 있다. 고르게 한다
+      setPicked(p);
     } else if (editing === "origin") {
       store.setOrigin(p);
     } else if (editing === "destination") {
@@ -107,10 +160,13 @@ export default function Page() {
 
   return (
     <main className="relative h-[100dvh] w-full overflow-hidden bg-[#EDF0F3]">
-      <MapView bottomInset={bottomInset} />
+      <MapView topInset={topInset} bottomInset={bottomInset} />
 
       {/* 상단 chrome */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-30 mx-auto w-full max-w-[var(--app-max-w)]">
+      <div
+        ref={topRef}
+        className="pointer-events-none absolute inset-x-0 top-0 z-30 mx-auto w-full max-w-[var(--app-max-w)]"
+      >
         {store.screen === "browse" ? (
           <TopBar onSearch={() => setEditing("browse")} />
         ) : (
@@ -151,6 +207,23 @@ export default function Page() {
         <div className="pb-2">
           <TimeBar />
         </div>
+
+        {picked && (
+          <PlaceCard
+            place={picked}
+            onOrigin={() => {
+              store.setOrigin(picked);
+              store.setScreen("routeInput");
+              setPicked(null);
+            }}
+            onDestination={() => {
+              store.setDestination(picked);
+              store.setScreen("routeInput");
+              setPicked(null);
+            }}
+            onClose={() => setPicked(null)}
+          />
+        )}
 
         {store.screen === "routeResult" && <RouteSheet />}
 
