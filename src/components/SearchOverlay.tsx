@@ -42,6 +42,8 @@ export default function SearchOverlay({
 }) {
   const [q, setQ] = useState(initial);
   const [hits, setHits] = useState<PlaceHit[]>([]);
+  /** 왜 못 찾았는지 서버가 알려 준 말 (예: 국내 주소 DB 키가 없다) */
+  const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [recent, setRecent] = useState<Place[]>([]);
@@ -60,6 +62,7 @@ export default function SearchOverlay({
     if (term.length < 2) {
       setHits([]);
       setErr(null);
+      setNotice(null);
       return;
     }
     const ctl = new AbortController();
@@ -73,6 +76,7 @@ export default function SearchOverlay({
       })
       .then((j) => {
         setHits(j.hits ?? []);
+        setNotice(j.notice ?? null);
         setErr(null);
       })
       .catch((e) => {
@@ -171,7 +175,14 @@ export default function SearchOverlay({
         ))}
 
         {!loading && !err && debounced.trim().length >= 2 && hits.length === 0 && (
-          <div className="px-4 py-10 text-center text-sm text-ink-400">검색 결과가 없습니다.</div>
+          <div className="px-6 py-10 text-center">
+            <p className="text-sm text-ink-400">검색 결과가 없습니다.</p>
+            {notice && (
+              <p className="mx-auto mt-3 max-w-[320px] text-[12px] leading-relaxed text-ink-400">
+                {notice}
+              </p>
+            )}
+          </div>
         )}
       </div>
     </div>

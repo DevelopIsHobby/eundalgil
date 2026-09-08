@@ -26,12 +26,54 @@ const KR_BBOX = [124.5, 33.0, 132.0, 38.7] as const;
  * 도로명 주소는 "삼성로86길" 처럼 길 번호를 붙여 쓴다.
  * 사람은 "삼성로 86길" 로 띄어 쓰는 일이 많은데, 그대로 보내면 한 건도 안 나온다.
  * "…로/대로" + 숫자 + "길/번길" 조합일 때만 붙인다. ("테헤란로 5" 의 5는 건물번호라 건드리면 안 된다)
+ *
+ * 지선은 "22라길" 처럼 숫자와 길 사이에 가·나·다·라가 낀다. 이것까지 받아야
+ * "양녕로 22라길" 이 "양녕로22라길" 로 붙는다.
  */
 function normalizeRoadName(q: string) {
   return q
-    .replace(/([가-힣A-Za-z0-9]+(?:대로|로))\s+(\d+)\s*(번길|길)/g, "$1$2$3")
+    .replace(/([가-힣A-Za-z0-9]+(?:대로|로))\s+(\d+)\s*([가-힣]?번?길)/g, "$1$2$3")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** "상도로", "양녕로22라길", "세종대로" 같은 도로명 조각 */
+const ROAD_RE = /[가-힣]{1,6}(?:대로|로)(?:\d+[가-힣]?번?길)?/g;
+/** "서울특별시", "동작구", "상도동" 같은 행정구역 조각 */
+const ADMIN_RE = /[가-힣]{1,6}(?:특별자치시|특별자치도|특별시|광역시|[시군구읍면동리])(?=\s|$)/g;
+/** 줄여 부르는 시·도 이름 ("서울 동작구 …") */
+const SHORT_REGION_RE =
+  /(?:^|\s)(?:서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)(?=\s|$)/g;
+
+function roadTokens(q: string) {
+  return (q.match(ROAD_RE) ?? []).sort((a, b) => b.length - a.length);
+}
+
+/**
+ * 도로명·행정구역·숫자만 남는 질의는 "주소를 친 것" 으로 본다.
+ * 이때는 그 도로명이 들어 있지 않은 결과를 지운다 — 키가 없어 국내 주소 DB 를 못 쓰면
+ * Nominatim·Photon 이 엉뚱한 동네(광주 남남로 등)를 물어 오는데, 그게 답인 척 앞에 서면
+ * 사용자는 "주소가 없어졌다" 고 느낀다. 없으면 없다고 하는 편이 낫다.
+ */
+function isAddressQuery(q: string) {
+  return (
+    q
+      .replace(ROAD_RE, " ")
+      .replace(ADMIN_RE, " ")
+      .replace(SHORT_REGION_RE, " ")
+      .replace(/[\d\s,\-]/g, "").length === 0
+  );
+}
+
+/** 주소 끝의 건물번호 ("56", "39-2") */
+function buildingNumber(q: string) {
+  const m = q.trim().match(/(\d+(?:-\d+)?)\s*$/);
+  return m ? m[1] : "";
+}
+
+function matchesRoad(hits: PlaceHit[], token: string) {
+  const needle = token.replace(/\s/g, "");
+  return hits.filter((h) => `${h.name}${h.address}`.replace(/\s/g, "").includes(needle));
 }
 
 /**
@@ -400,17 +442,52 @@ export async function GET(req: NextRequest) {
   const q = normalizeRoadName(raw);
   const key = bias ? `${q}|${bias.lng.toFixed(2)},${bias.lat.toFixed(2)}` : q;
 
+  /** 국내 주소·상호 DB 를 쓸 수 있는 상태인지 (없으면 OSM 만으로 찾는다) */
+  const hasKoreanDb = !!(
+    (process.env.VWORLD_KEY ?? process.env.NEXT_PUBLIC_VWORLD_KEY ?? "").trim() ||
+    (process.env.NAVER_SEARCH_CLIENT_ID && process.env.NAVER_SEARCH_CLIENT_SECRET)
+  );
+  const roadToken = isAddressQuery(q) ? roadTokens(q)[0] : undefined;
+
+  const answer = (hits: PlaceHit[]) => {
+    const shown = roadToken ? matchesRoad(hits, roadToken) : hits;
+    const notice =
+      shown.length || !roadToken
+        ? undefined
+        : hasKoreanDb
+          ? `"${roadToken}" 이 들어간 주소를 찾지 못했어요. 도로명을 다시 확인해 주세요.`
+          : "국내 도로명주소·건물명은 OpenStreetMap 에 거의 없습니다. .env.local 에 브이월드 키(VWORLD_KEY)를 넣으면 찾을 수 있어요.";
+    return NextResponse.json({ hits: shown, notice });
+  };
+
   const cached = cache.get(key);
-  if (cached && Date.now() - cached.at < TTL) return NextResponse.json({ hits: cached.hits });
+  if (cached && Date.now() - cached.at < TTL) return answer(cached.hits);
 
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 8000);
   try {
-    const hits =
-      (await naverLocal(q, ctl.signal)) ?? (await search(q, bias, req.nextUrl.origin, ctl.signal));
+    const ask = async (term: string) =>
+      (await naverLocal(term, ctl.signal)) ??
+      (await search(term, bias, req.nextUrl.origin, ctl.signal));
+
+    let hits = await ask(q);
+
+    /*
+     * 주소를 통째로 넣으면 오히려 못 찾는 일이 있다.
+     * "동작구 상도로 양녕로 22라길 56" 처럼 도로명이 둘 섞이면 주소 DB 가 헤매기 때문이다.
+     * 이럴 때는 가장 구체적인 도로명 + 건물번호만 남겨 한 번 더 묻는다.
+     */
+    if (roadToken && !matchesRoad(hits, roadToken).length) {
+      const compact = [roadToken, buildingNumber(q)].filter(Boolean).join(" ");
+      if (compact !== q) {
+        const retry = await ask(compact);
+        if (matchesRoad(retry, roadToken).length) hits = retry;
+      }
+    }
+
     cache.set(key, { at: Date.now(), hits });
     if (cache.size > 200) cache.delete(cache.keys().next().value as string);
-    return NextResponse.json({ hits });
+    return answer(hits);
   } catch (err) {
     return new NextResponse((err as Error).message, { status: 502 });
   } finally {
