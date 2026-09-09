@@ -9,7 +9,70 @@ import SeatDiagram from "./SeatDiagram";
 // 지도와 시트가 같은 색을 써야 한 여정으로 읽힌다
 import { rideColorOf as rideColor } from "./MapView";
 import { sheltersNearPath, type Shelter } from "@/lib/shelters";
-import { IconBus, IconLeaf, IconShelter, IconSubway, IconSun, IconWalk } from "./icons";
+import { getSunState } from "@/lib/sun";
+import { IconBus, IconClock, IconLeaf, IconShelter, IconSubway, IconSun, IconWalk } from "./icons";
+
+/**
+ * 햇빛 아래 걷는 거리와 그때의 체감온도.
+ *
+ * "그늘 52%" 는 비율이라 와닿지 않는다. **몇 미터를 몇 도에서 걷는지**로 바꿔 준다.
+ * 해가 진 뒤나 걷는 거리가 얼마 안 될 때는 굳이 띄우지 않는다.
+ */
+function HeatLine({ plan }: { plan: Plan }) {
+  const weather = useApp((s) => s.weather);
+  const center = useApp((s) => s.center);
+  const sun = getSunState(new Date(plan.startMs), center);
+  const sunlit = plan.walkMeters * (1 - plan.walkShade);
+  if (!sun.isDay || sunlit < 100) return null;
+
+  const hot = weather && weather.feelsC >= 28;
+  return (
+    <p
+      className={`mt-2 flex flex-wrap items-center gap-x-1.5 rounded-lg px-2.5 py-2 text-[12px] leading-relaxed ${
+        hot ? "bg-[#FFF3E0] text-[#B4531B]" : "bg-[#F7F8F9] text-ink-500"
+      }`}
+    >
+      <IconSun className="h-3.5 w-3.5 shrink-0" />
+      <span>
+        햇빛 아래 <b className="font-bold">{formatDistance(sunlit)}</b>
+        {weather && (
+          <>
+            {" · 체감 "}
+            <b className="font-bold">{weather.feelsC}°</b>
+            {weather.uv >= 6 && <span className="text-ink-400"> · 자외선 {weather.uv}</span>}
+          </>
+        )}
+      </span>
+    </p>
+  );
+}
+
+/**
+ * "조금 이따 나서면 같은 길이 더 시원하다" 는 안내.
+ * 시각 막대가 이미 있으니, 눌러서 그 시각으로 바로 옮겨 볼 수 있게 한다.
+ */
+function DepartureHint() {
+  const departure = useApp((s) => s.departure);
+  const setTime = useApp((s) => s.setTime);
+  if (!departure) return null;
+
+  const pct = Math.round(departure.shade * 100);
+  const nowPct = Math.round(departure.nowShade * 100);
+  return (
+    <button
+      onClick={() => setTime(departure.atMs, false)}
+      className="mt-2 flex w-full items-center gap-2 rounded-lg bg-brand-soft px-2.5 py-2 text-left text-[12px] leading-relaxed text-brand"
+    >
+      <IconClock className="h-3.5 w-3.5 shrink-0" />
+      <span className="flex-1">
+        <b className="font-bold">{formatClockKo(departure.atMs)}</b>에 나서면 같은 길이 그늘{" "}
+        <b className="font-bold">{pct}%</b>
+        <span className="text-brand/70"> (지금 {nowPct}%)</span>
+      </span>
+      <span className="shrink-0 rounded-md bg-white px-2 py-1 text-[11px] font-bold">그때로 보기</span>
+    </button>
+  );
+}
 
 /** 수단 막대 — 도보/승차 시간을 비율대로 늘어놓는다 */
 function ModeBar({ plan }: { plan: Plan }) {
@@ -367,6 +430,9 @@ export default function PlanSheet() {
             <div className="mt-3">
               <ModeBar plan={plan} />
             </div>
+
+            <HeatLine plan={plan} />
+            <DepartureHint />
           </div>
 
           {/* 구간 */}

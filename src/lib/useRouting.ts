@@ -4,7 +4,15 @@ import { useEffect } from "react";
 import { useApp } from "./store";
 import { useDebounced } from "./useDebounced";
 import { fetchOsmBundles, type OsmBundle } from "./osm";
-import { bboxContains, bboxOfPoints, distMeters, padBBox, type BBox, type LngLat } from "./geo";
+import {
+  bboxContains,
+  bboxOfPoints,
+  distMeters,
+  padBBox,
+  resample,
+  type BBox,
+  type LngLat,
+} from "./geo";
 import { getSunState } from "./sun";
 import { ShadeIndex, buildShadows } from "./shadow";
 import { SafetyIndex } from "./safety";
@@ -56,6 +64,55 @@ const TRANSIT_CANDIDATES = 10;
 const MAX_TRANSIT_PLANS = 4;
 /** 환승 지점 언저리에서 따로 받아 오는 보행로 반경(m) — 환승 도보를 덮을 만큼만 */
 const HUB_PAD_M = 500;
+/** 출발 시각을 미뤄 볼 폭 — 30분 간격으로 세 시간까지 */
+const LATER_STEPS_MIN = [30, 60, 90, 120, 150, 180];
+/** 이만큼(%p) 이상 좋아져야 "이따 나가라" 고 말할 값어치가 있다 */
+const LATER_GAIN = 0.1;
+
+/**
+ * 같은 길을 이따 걸으면 그늘이 얼마나 달라지는지.
+ *
+ * 경로를 다시 찾지는 않는다 — **지금 고른 길 그대로** 해만 옮겨 다시 재는 것이다.
+ * 해가 기울면 같은 길도 그늘이 확 늘어난다. 그걸 알면 "10분 뒤에 나가지" 가 된다.
+ */
+function betterDeparture(
+  bundles: OsmBundle[],
+  walkPaths: LngLat[][],
+  fromMs: number,
+  useTrees: boolean
+) {
+  const samples = walkPaths.flatMap((p) => (p.length > 1 ? resample(p, 15) : []));
+  if (samples.length < 5) return null;
+
+  const center: LngLat = [
+    samples.reduce((a, p) => a + p[0], 0) / samples.length,
+    samples.reduce((a, p) => a + p[1], 0) / samples.length,
+  ];
+  const buildings = bundles.flatMap((b) => b.buildings);
+  const trees = useTrees ? bundles.flatMap((b) => b.trees) : [];
+  if (!buildings.length) return null;
+
+  const shadeAt = (ms: number) => {
+    const sun = getSunState(new Date(ms), center);
+    if (!sun.isDay) return 1; // 해가 지면 온통 그늘이다
+    const index = new ShadeIndex(buildShadows(buildings, trees, sun), center[1]);
+    let sum = 0;
+    for (const p of samples) sum += index.shadeAt(p);
+    return sum / samples.length;
+  };
+
+  const now = shadeAt(fromMs);
+  let best = { atMs: fromMs, shade: now };
+  for (const min of LATER_STEPS_MIN) {
+    const atMs = fromMs + min * 60_000;
+    const shade = shadeAt(atMs);
+    if (shade > best.shade + 0.001) best = { atMs, shade };
+  }
+
+  if (best.atMs === fromMs || best.shade - now < LATER_GAIN) return null;
+  return { atMs: best.atMs, shade: best.shade, nowShade: now };
+}
+
 /** 이만큼 안에 있는 환승 지점은 한 번만 받는다 */
 const HUB_MERGE_M = 400;
 /** 환승 지점 보행로를 받아 올 횟수 상한 — 한 곳당 Overpass 한 번이다 */
@@ -400,7 +457,17 @@ export function useRouting() {
         }
 
         pairs.sort((a, b) => a.fast.seconds - b.fast.seconds);
-        useApp.getState().setPlans(pairs.slice(0, 4), null, notices);
+        const picked = pairs.slice(0, 4);
+        useApp.getState().setPlans(picked, null, notices);
+
+        /* 이따 나가면 같은 길이 더 시원한지 — 경로가 정해진 다음에 따져 본다 */
+        const walkPaths = picked[0].shade.legs
+          .filter((l) => l.type === "walk")
+          .map((l) => (l as { route: RouteResult }).route.path);
+        const loaded = bundles.filter((b): b is OsmBundle => !!b);
+        useApp
+          .getState()
+          .setDeparture(sun.isDay ? betterDeparture(loaded, walkPaths, timeMs, showTrees) : null);
       } catch (err) {
         if (cancelled || (err as Error).name === "AbortError") return;
         useApp.getState().setPlans([], (err as Error).message);

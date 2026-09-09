@@ -37,17 +37,31 @@ export async function GET(req: NextRequest) {
 
   const url =
     `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(3)}&longitude=${lng.toFixed(3)}` +
-    `&current=temperature_2m,weather_code&timezone=auto`;
+    // 그늘을 따지는 앱이라 기온보다 **체감온도**가 본론이다. 습도·자외선도 같이 본다
+    `&current=temperature_2m,apparent_temperature,relative_humidity_2m,uv_index,weather_code` +
+    `&timezone=auto`;
 
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
     if (!res.ok) return new NextResponse("날씨를 불러오지 못했습니다", { status: 502 });
     const json = (await res.json()) as {
-      current?: { temperature_2m?: number; weather_code?: number };
+      current?: {
+        temperature_2m?: number;
+        apparent_temperature?: number;
+        relative_humidity_2m?: number;
+        uv_index?: number;
+        weather_code?: number;
+      };
     };
-    const code = json.current?.weather_code ?? 0;
+    const cur = json.current ?? {};
+    const code = cur.weather_code ?? 0;
+    const tempC = Math.round(cur.temperature_2m ?? 0);
     const data = {
-      tempC: Math.round(json.current?.temperature_2m ?? 0),
+      tempC,
+      // 체감온도를 못 받으면 기온으로 대신한다 (없는 값을 지어내지 않는다)
+      feelsC: Math.round(cur.apparent_temperature ?? cur.temperature_2m ?? 0),
+      humidity: Math.round(cur.relative_humidity_2m ?? 0),
+      uv: Math.round((cur.uv_index ?? 0) * 10) / 10,
       code,
       label: label(code),
     };

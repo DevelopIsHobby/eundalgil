@@ -50,6 +50,10 @@ export default function WeatherCard() {
       <div className="flex justify-center">{icon(weather.code)}</div>
       <p className="mt-1 text-[22px] font-extrabold leading-none tabular-nums">{weather.tempC}°</p>
       <p className="mt-1 text-[12px] font-semibold text-ink-500">{weather.label}</p>
+      {/* 체감이 기온과 다를 때만 — 같으면 굳이 두 번 말할 필요가 없다 */}
+      {Math.abs(weather.feelsC - weather.tempC) >= 1 && (
+        <p className="mt-0.5 text-[11px] text-ink-400 tabular-nums">체감 {weather.feelsC}°</p>
+      )}
     </div>
   );
 }

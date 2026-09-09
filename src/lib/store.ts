@@ -13,7 +13,15 @@ export type Place = { name: string; address?: string; p: LngLat };
 
 export type Screen = "browse" | "routeInput" | "routeResult";
 
-export type Weather = { tempC: number; label: string; code: number } | null;
+export type Weather = {
+  tempC: number;
+  /** 체감온도 — 그늘을 따질 때는 기온보다 이쪽이 본론이다 */
+  feelsC: number;
+  humidity: number;
+  uv: number;
+  label: string;
+  code: number;
+} | null;
 
 type State = {
   screen: Screen;
@@ -55,6 +63,8 @@ type State = {
   weather: Weather;
   /** 지금 보고 있는 여정 주변의 무더위쉼터 */
   shelters: Shelter[];
+  /** 같은 길을 이따 걸으면 더 시원할 때, 그 시각 */
+  departure: { atMs: number; shade: number; nowShade: number } | null;
   toast: string | null;
 };
 
@@ -85,6 +95,7 @@ type Actions = {
 
   setWeather: (w: Weather) => void;
   setShelters: (s: Shelter[]) => void;
+  setDeparture: (d: { atMs: number; shade: number; nowShade: number } | null) => void;
   showToast: (msg: string | null) => void;
   reset: () => void;
 };
@@ -123,6 +134,7 @@ export const useApp = create<State & Actions>((set, get) => ({
 
   weather: null,
   shelters: [],
+  departure: null,
   toast: null,
 
   setScreen: (screen) => set({ screen }),
@@ -162,6 +174,7 @@ export const useApp = create<State & Actions>((set, get) => ({
 
   setWeather: (weather) => set({ weather }),
   setShelters: (shelters) => set({ shelters }),
+  setDeparture: (departure) => set({ departure }),
   showToast: (toast) => set({ toast }),
   reset: () =>
     set({
