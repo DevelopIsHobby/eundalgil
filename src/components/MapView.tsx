@@ -7,7 +7,7 @@ import { useActivePlan, useApp } from "@/lib/store";
 import { useLatest } from "@/lib/useDebounced";
 import { getSunState } from "@/lib/sun";
 import { ShadeIndex, buildShadows, type ShadowPoly } from "@/lib/shadow";
-import { fetchOsmBundle } from "@/lib/osm";
+import { fetchOsmBundles } from "@/lib/osm";
 import { distMeters, pathLength, type LngLat } from "@/lib/geo";
 import type { Leg, Plan, RideLeg } from "@/lib/plan";
 import { MIN_DATA_ZOOM, REFETCH_PAD_M, DEFAULT_CENTER, DEFAULT_ZOOM } from "@/lib/config";
@@ -358,8 +358,8 @@ export default function MapView({
     s.setDataLoading(true);
     s.setDataError(null);
     try {
-      const bundle = await fetchOsmBundle(wide);
-      latest.current.setData(bundle);
+      const [bundle] = await fetchOsmBundles([wide]);
+      if (bundle) latest.current.setData(bundle);
     } catch (err) {
       lastFetchBBox.current = null;
       latest.current.setDataError((err as Error).message);

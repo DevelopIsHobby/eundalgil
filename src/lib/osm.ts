@@ -39,14 +39,22 @@ export type SafetyPoint = {
   kind: "cctv" | "lamp" | "emergency";
 };
 
-export async function fetchOsmBundle(
-  bbox: [number, number, number, number],
+/**
+ * 여러 범위를 **한 번에** 받는다.
+ * 공개 Overpass 는 요청마다 줄을 서므로, 따로 부르면 그 대기가 그대로 쌓인다.
+ * 못 받은 범위 자리에는 null 이 들어간다.
+ */
+export async function fetchOsmBundles(
+  boxes: [number, number, number, number][],
   signal?: AbortSignal
-): Promise<OsmBundle> {
-  const qs = new URLSearchParams({ bbox: bbox.map((v) => v.toFixed(6)).join(",") });
+): Promise<(OsmBundle | null)[]> {
+  if (!boxes.length) return [];
+  const qs = new URLSearchParams();
+  for (const b of boxes) qs.append("bbox", b.map((v) => v.toFixed(6)).join(","));
   const res = await fetch(`/api/osm?${qs}`, { signal });
   if (!res.ok) throw new Error(await readError(res));
-  return res.json();
+  const json = (await res.json()) as { bundles?: (OsmBundle | null)[] };
+  return json.bundles ?? [];
 }
 
 /**

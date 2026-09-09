@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { estimateHeight } from "@/lib/shadow";
-import { bboxContains, bboxOfPoints, pointInRing, type BBox, type LngLat } from "@/lib/geo";
+import {
+  bboxContains,
+  bboxIntersects,
+  bboxOfPoints,
+  pointInRing,
+  type BBox,
+  type LngLat,
+} from "@/lib/geo";
 import type { OsmBundle, RawBuilding, RawTree, SafetyPoint, WalkWay } from "@/lib/osm";
 import { overpass, type OverpassElement } from "@/lib/overpass";
 import { loadElevation, smoothProfile } from "@/lib/elevation";
@@ -12,15 +19,42 @@ export const dynamic = "force-dynamic";
 const MAX_SPAN_LAT = 0.028;
 const MAX_SPAN_LNG = 0.035;
 
-const CACHE_TTL_MS = 10 * 60 * 1000;
-const CACHE_MAX = 40;
+/**
+ * 건물·길·가로수는 좀처럼 바뀌지 않는다. 반면 Overpass 는 느리고 자주 거절한다.
+ * 그러니 오래 들고 있는 편이 낫다 — 같은 동네를 다시 찾을 때 즉시 답한다.
+ */
+const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const CACHE_MAX = 32;
 const cache = new Map<string, { at: number; data: OsmBundle }>();
+
+/**
+ * 요청 범위를 이 격자에 맞춰 넓힌다 (약 400m).
+ * 출발지를 조금만 옮겨도 범위가 달라져 캐시가 통째로 빗나가던 것을 막는다.
+ */
+const SNAP_DEG = 0.004;
+/** 한 번에 받을 범위 수 — 출발·도착·환승 두어 곳이면 충분하다 */
+const MAX_BOXES = 6;
+
+/**
+ * 지금 받아 오는 중인 요청. 같은 범위를 동시에 물으면 하나로 합친다.
+ *
+ * React strict mode 는 이펙트를 두 번 돌린다. 클라이언트가 첫 요청을 곧바로 끊어도
+ * 서버는 이미 시작한 Overpass 쿼리를 끝까지 돌리므로, 검색 한 번에 무거운 쿼리가
+ * 두 번 나간다 — 그러다 미러에 거절당하면 그때부터 훨씬 느려진다.
+ */
+const inflight = new Map<string, Promise<(OsmBundle | null)[]>>();
 
 const WALK_HIGHWAY =
   "^(footway|path|pedestrian|steps|living_street|residential|service|unclassified|tertiary|tertiary_link|secondary|secondary_link|primary|primary_link|track|cycleway|road)$";
 
-function buildQuery(s: number, w: number, n: number, e: number) {
-  const bb = `${s},${w},${n},${e}`;
+/**
+ * 범위 하나짜리 쿼리.
+ *
+ * 여러 범위를 union 으로 묶어 한 번에 물어봤더니 미러가 50초 만에 504 로 끊었다.
+ * Overpass 는 쿼리가 무거워지면 급격히 느려진다 — 나눠서 **동시에** 묻는 편이 낫다.
+ */
+function buildQuery(b: BBox) {
+  const bb = `${b.minLat},${b.minLng},${b.maxLat},${b.maxLng}`;
   return `[out:json][timeout:40];
 (
   way["building"](${bb});
@@ -89,65 +123,36 @@ function walkable(tags: Record<string, string>) {
   return true;
 }
 
-export async function GET(req: NextRequest) {
-  const raw = req.nextUrl.searchParams.get("bbox");
-  if (!raw) return new NextResponse("bbox 파라미터가 필요합니다", { status: 400 });
+type Wood = { ring: LngLat[]; bbox: BBox };
 
-  const nums = raw.split(",").map(Number);
-  if (nums.length !== 4 || nums.some((v) => !Number.isFinite(v)))
-    return new NextResponse("bbox 형식이 올바르지 않습니다", { status: 400 });
-
-  let [minLng, minLat, maxLng, maxLat] = nums;
-  // 과도한 요청 범위는 중심 기준으로 잘라낸다
-  const cLng = (minLng + maxLng) / 2;
-  const cLat = (minLat + maxLat) / 2;
-  if (maxLng - minLng > MAX_SPAN_LNG) {
-    minLng = cLng - MAX_SPAN_LNG / 2;
-    maxLng = cLng + MAX_SPAN_LNG / 2;
-  }
-  if (maxLat - minLat > MAX_SPAN_LAT) {
-    minLat = cLat - MAX_SPAN_LAT / 2;
-    maxLat = cLat + MAX_SPAN_LAT / 2;
-  }
-
-  const key = [minLng, minLat, maxLng, maxLat].map((v) => v.toFixed(4)).join(",");
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
-    return NextResponse.json(hit.data);
-  }
-
-  let elements: OverpassElement[];
-  try {
-    elements = await overpass(buildQuery(minLat, minLng, maxLat, maxLng));
-  } catch (err) {
-    return new NextResponse((err as Error).message, { status: 503 });
-  }
-
-  const buildings: RawBuilding[] = [];
-  const trees: RawTree[] = [];
-  const ways: WalkWay[] = [];
-  const safety: SafetyPoint[] = [];
-
-  /*
-   * 태그 없는 highway=path 를 무조건 산길로 보면, 아파트 단지 안 보행로까지 산길이 된다.
-   * (상도역롯데캐슬파크엘 단지 내 길 357m 가 실제로 그렇게 잡혔다)
-   * 그래서 숲 폴리곤을 같이 받아 두고, 그 안에 있는 비포장 길만 산길로 본다.
-   */
-  const woods: { ring: LngLat[]; bbox: BBox }[] = [];
+/** 숲 폴리곤 — 태그 없는 산길을 가려내는 데 쓴다 */
+function woodsOf(elements: OverpassElement[]): Wood[] {
+  const out: Wood[] = [];
   for (const el of elements) {
     const t = el.tags ?? {};
     if (el.type !== "way" || !el.geometry || el.geometry.length < 4) continue;
     if (!/^(wood|scrub)$/.test(t.natural ?? "") && t.landuse !== "forest") continue;
     const ring: LngLat[] = el.geometry.map((g) => [g.lon, g.lat]);
-    woods.push({ ring, bbox: bboxOfPoints(ring) });
+    out.push({ ring, bbox: bboxOfPoints(ring) });
   }
-  const inWood = (p: LngLat) =>
-    woods.some((w) => bboxContains(w.bbox, p) && pointInRing(p, w.ring));
+  return out;
+}
+
+/** 한 번에 받은 요소들 중 이 범위에 걸리는 것만 골라 번들 하나로 만든다 */
+function bundleOf(elements: OverpassElement[], box: BBox, woods: Wood[]): OsmBundle {
+  const buildings: RawBuilding[] = [];
+  const trees: RawTree[] = [];
+  const ways: WalkWay[] = [];
+  const safety: SafetyPoint[] = [];
+
+  const inWood = (p: LngLat) => woods.some((w) => bboxContains(w.bbox, p) && pointInRing(p, w.ring));
 
   for (const el of elements) {
     const tags = el.tags ?? {};
     if (el.type === "way" && el.geometry && el.geometry.length >= 2) {
       const path: LngLat[] = el.geometry.map((g) => [g.lon, g.lat]);
+      // 걸치기만 해도 넣는다 — 경계에서 잘린 건물·길은 그늘도 경로도 어긋나게 만든다
+      if (!bboxIntersects(box, bboxOfPoints(path))) continue;
       if (tags.building) {
         if (path.length >= 4) {
           buildings.push({
@@ -172,6 +177,7 @@ export async function GET(req: NextRequest) {
       }
     } else if (el.type === "node" && el.lat != null && el.lon != null) {
       const p: LngLat = [el.lon, el.lat];
+      if (!bboxContains(box, p)) continue;
       if (tags.natural === "tree") {
         const h = parseFloat(tags.height ?? "") || 8;
         const crown = parseFloat(tags["diameter_crown"] ?? "") / 2 || 3;
@@ -186,29 +192,121 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // 보행로 좌표마다 고도를 붙인다. DEM 을 못 받으면 그냥 없이 간다
-  const elevation = await loadElevation([minLng, minLat, maxLng, maxLat]);
-  if (!elevation) console.warn("[osm] 고도 없이 응답합니다 — 언덕을 넘는 경로가 나올 수 있습니다");
-  if (elevation) {
-    for (const w of ways) {
-      w.elev = smoothProfile(w.path.map(([lng, lat]) => elevation(lng, lat)));
-    }
-  }
-
-  const data: OsmBundle = {
+  return {
     buildings,
     trees,
     ways,
     safety,
-    bbox: [minLng, minLat, maxLng, maxLat],
+    bbox: [box.minLng, box.minLat, box.maxLng, box.maxLat],
     fetchedAt: Date.now(),
   };
+}
 
-  cache.set(key, { at: Date.now(), data });
-  if (cache.size > CACHE_MAX) {
-    const oldest = [...cache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
-    if (oldest) cache.delete(oldest[0]);
+/** 요청 범위를 격자에 맞춰 넓힌다 — 조금씩 다른 범위가 같은 캐시를 쓰게 된다 */
+function snap(b: BBox): BBox {
+  const f = (v: number, dir: -1 | 1) =>
+    (dir < 0 ? Math.floor(v / SNAP_DEG) : Math.ceil(v / SNAP_DEG)) * SNAP_DEG;
+  return {
+    minLng: f(b.minLng, -1),
+    minLat: f(b.minLat, -1),
+    maxLng: f(b.maxLng, 1),
+    maxLat: f(b.maxLat, 1),
+  };
+}
+
+/** 너무 넓은 범위는 가운데를 기준으로 잘라 Overpass 과부하를 막는다 */
+function clamp(b: BBox): BBox {
+  const cLng = (b.minLng + b.maxLng) / 2;
+  const cLat = (b.minLat + b.maxLat) / 2;
+  const out = { ...b };
+  if (b.maxLng - b.minLng > MAX_SPAN_LNG) {
+    out.minLng = cLng - MAX_SPAN_LNG / 2;
+    out.maxLng = cLng + MAX_SPAN_LNG / 2;
+  }
+  if (b.maxLat - b.minLat > MAX_SPAN_LAT) {
+    out.minLat = cLat - MAX_SPAN_LAT / 2;
+    out.maxLat = cLat + MAX_SPAN_LAT / 2;
+  }
+  return out;
+}
+
+const keyOf = (b: BBox) =>
+  [b.minLng, b.minLat, b.maxLng, b.maxLat].map((v) => v.toFixed(4)).join(",");
+
+/**
+ * 범위마다 번들 하나. **여러 범위를 Overpass 한 번으로 받는다.**
+ *
+ * 공개 미러는 붐빌 때 요청 하나에 수십 초씩 걸리고 거절도 잦다. 실제로 재 보면
+ * 걸리는 시간이 범위 크기와 거의 상관없다 — 줄 서는 시간이 대부분이다.
+ * 그래서 출발지·목적지·환승지를 따로 부르면 그 줄서기가 그대로 쌓인다.
+ */
+export async function GET(req: NextRequest) {
+  const raws = req.nextUrl.searchParams.getAll("bbox");
+  if (!raws.length) return new NextResponse("bbox 파라미터가 필요합니다", { status: 400 });
+  if (raws.length > MAX_BOXES)
+    return new NextResponse(`범위는 한 번에 ${MAX_BOXES}개까지입니다`, { status: 400 });
+
+  const boxes: BBox[] = [];
+  for (const raw of raws) {
+    const n = raw.split(",").map(Number);
+    if (n.length !== 4 || n.some((v) => !Number.isFinite(v)))
+      return new NextResponse("bbox 형식이 올바르지 않습니다", { status: 400 });
+    boxes.push(snap(clamp({ minLng: n[0], minLat: n[1], maxLng: n[2], maxLat: n[3] })));
   }
 
-  return NextResponse.json(data);
+  const wanted = boxes.map(keyOf).join(";");
+  const shared = inflight.get(wanted);
+  if (shared) return NextResponse.json({ bundles: await shared });
+
+  const run = collect(boxes).finally(() => inflight.delete(wanted));
+  inflight.set(wanted, run);
+
+  try {
+    return NextResponse.json({ bundles: await run });
+  } catch (err) {
+    return new NextResponse((err as Error).message, { status: 503 });
+  }
+}
+
+async function collect(boxes: BBox[]): Promise<(OsmBundle | null)[]> {
+  const now = Date.now();
+  const bundles: (OsmBundle | null)[] = boxes.map((b) => {
+    const hit = cache.get(keyOf(b));
+    return hit && now - hit.at < CACHE_TTL_MS ? hit.data : null;
+  });
+
+  // 범위마다 따로, 그러나 동시에 묻는다. 하나가 실패해도 나머지는 쓴다
+  await Promise.all(
+    boxes.map(async (box, i) => {
+      if (bundles[i]) return;
+      let data: OsmBundle;
+      try {
+        const elements = await overpass(buildQuery(box));
+        data = bundleOf(elements, box, woodsOf(elements));
+      } catch (err) {
+        console.warn("[osm]", (err as Error).message);
+        return;
+      }
+
+      // 보행로 좌표마다 고도를 붙인다. DEM 을 못 받으면 그냥 없이 간다
+      const elevation = await loadElevation([box.minLng, box.minLat, box.maxLng, box.maxLat]);
+      if (!elevation)
+        console.warn("[osm] 고도 없이 응답합니다 — 언덕을 넘는 경로가 나올 수 있습니다");
+      else
+        for (const w of data.ways)
+          w.elev = smoothProfile(w.path.map(([lng, lat]) => elevation(lng, lat)));
+
+      bundles[i] = data;
+      // 길도 건물도 없으면 제대로 받은 게 아니다. 12시간 캐시에 남기면 두고두고 잘못 안내한다
+      if (data.ways.length || data.buildings.length) cache.set(keyOf(box), { at: now, data });
+    })
+  );
+
+  while (cache.size > CACHE_MAX) {
+    const oldest = [...cache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (!oldest) break;
+    cache.delete(oldest[0]);
+  }
+
+  return bundles;
 }

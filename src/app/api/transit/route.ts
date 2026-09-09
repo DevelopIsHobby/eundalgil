@@ -28,6 +28,11 @@ export const dynamic = "force-dynamic";
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const CACHE_MAX = 30;
 const cache = new Map<string, { at: number; data: TransitData }>();
+/**
+ * 지금 받아 오는 중인 요청. React strict mode 로 같은 조회가 두 번 들어와도
+ * Overpass·TOPIS 를 두 번 부르지 않는다.
+ */
+const inflight = new Map<string, Promise<TransitData>>();
 
 /** 정류장을 찾는 반경 상한(m) — 이보다 넓히면 Overpass 응답이 급격히 커진다 */
 const MAX_RADIUS_M = 1200;
@@ -206,6 +211,32 @@ export async function GET(req: NextRequest) {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return NextResponse.json(hit.data);
 
+  const shared = inflight.get(key);
+  if (shared) {
+    try {
+      return NextResponse.json(await shared);
+    } catch (err) {
+      return new NextResponse((err as Error).message, { status: 503 });
+    }
+  }
+
+  const run = build(a, b, radius, corridor, key).finally(() => inflight.delete(key));
+  inflight.set(key, run);
+  try {
+    return NextResponse.json(await run);
+  } catch (err) {
+    return new NextResponse((err as Error).message, { status: 503 });
+  }
+}
+
+async function build(
+  a: LngLat,
+  b: LngLat,
+  radius: number,
+  corridor: BBox,
+  key: string
+): Promise<TransitData> {
+
   /*
    * 지하철은 OSM, 버스는 TAGO·TOPIS 에서 온다.
    * Overpass 가 죽어도 버스 안내는 나가야 하므로 여기서 끝내지 않는다.
@@ -379,7 +410,7 @@ export async function GET(req: NextRequest) {
   };
 
   // 지하철도 버스도 못 받았으면 그건 실패다
-  if (osmError && !busPatterns.length) return new NextResponse(osmError, { status: 503 });
+  if (osmError && !busPatterns.length) throw new Error(osmError);
 
   cache.set(key, { at: Date.now(), data });
   if (cache.size > CACHE_MAX) {
@@ -387,5 +418,5 @@ export async function GET(req: NextRequest) {
     if (oldest) cache.delete(oldest[0]);
   }
 
-  return NextResponse.json(data);
+  return data;
 }

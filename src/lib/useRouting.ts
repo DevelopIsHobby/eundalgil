@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { useApp } from "./store";
 import { useDebounced } from "./useDebounced";
-import { fetchOsmBundle, type OsmBundle } from "./osm";
+import { fetchOsmBundles, type OsmBundle } from "./osm";
 import { bboxContains, bboxOfPoints, distMeters, padBBox, type BBox, type LngLat } from "./geo";
 import { getSunState } from "./sun";
 import { ShadeIndex, buildShadows } from "./shadow";
@@ -153,32 +153,82 @@ export function useRouting() {
       const singleBundle = straight <= SINGLE_BUNDLE_M;
 
       /* 받아야 할 OSM 범위 — 도보용 한 덩어리, 먼 구간이면 양 끝을 따로 */
-      const boxes: [number, number, number, number][] = [];
+      const rects: BBox[] = [];
       if (wantWalk || singleBundle) {
-        const box = padBBox(bboxOfPoints([origin.p, destination.p]), Math.max(400, straight * 0.45));
-        boxes.push([box.minLng, box.minLat, box.maxLng, box.maxLat]);
+        rects.push(padBBox(bboxOfPoints([origin.p, destination.p]), Math.max(400, straight * 0.45)));
       }
       if (!singleBundle && wantTransit) {
-        for (const p of [origin.p, destination.p]) {
-          const box = padBBox(bboxOfPoints([p]), ENDPOINT_PAD_M);
-          boxes.push([box.minLng, box.minLat, box.maxLng, box.maxLat]);
-        }
+        for (const p of [origin.p, destination.p]) rects.push(padBBox(bboxOfPoints([p]), ENDPOINT_PAD_M));
       }
+      const toTuple = (b: BBox): [number, number, number, number] => [
+        b.minLng,
+        b.minLat,
+        b.maxLng,
+        b.maxLat,
+      ];
+      const boxes = rects.map(toTuple);
 
-      const bundlesPromise = Promise.all(
-        boxes.map((b) => fetchOsmBundle(b, ctl.signal).catch(() => null))
+      // 범위가 여럿이어도 요청은 한 번이다 — Overpass 는 요청마다 줄을 선다
+      const bundlesPromise = fetchOsmBundles(boxes, ctl.signal).catch(
+        (): (OsmBundle | null)[] => []
       );
       // 노선 정보를 못 받아도 도보 경로는 나와야 하므로 실패를 삼킨다
       const transitPromise = wantTransit
         ? fetchTransit(origin.p, destination.p, ctl.signal).catch(() => null)
         : Promise.resolve(null);
 
+      /*
+       * 노선 정보는 보행로보다 훨씬 빨리 온다. 그래서 그것만 있으면 되는 일들을
+       * 보행로를 기다리지 않고 미리 시작한다 — 형상·환승지 보행로·실시간 도착.
+       * 차례로 기다리면 Overpass 왕복이 두 번 쌓여 조회가 그만큼 느려진다.
+       */
+      const prepPromise = transitPromise.then(async (transit) => {
+        if (!transit) return null;
+        const rough = planTransit(transit, origin.p, destination.p, TRANSIT_CANDIDATES);
+        if (!rough.length) return { rough, shapes: [], extra: [], live: null };
+
+        const used = new Map<string, TransitPattern>();
+        const boarding = new Map<string, TransitStop>();
+        const hubBoxes: [number, number, number, number][] = [];
+        const hubSeen: LngLat[] = [];
+        for (const c of rough) {
+          for (const r of c.rides) {
+            used.set(r.pattern.id, r.pattern);
+            boarding.set(r.from.id, r.from);
+          }
+          for (let k = 1; k < c.rides.length; k++) {
+            for (const p of [c.rides[k - 1].to.p, c.rides[k].from.p]) {
+              // 이미 받기로 한 범위 안이면 따로 받을 것 없다
+              if (rects.some((b) => bboxContains(b, p))) continue;
+              if (hubSeen.some((h) => distMeters(h, p) < HUB_MERGE_M)) continue;
+              hubSeen.push(p);
+              if (hubBoxes.length >= MAX_HUB_BUNDLES) continue;
+              hubBoxes.push(toTuple(padBBox(bboxOfPoints([p]), HUB_PAD_M)));
+            }
+          }
+        }
+
+        const [shapes, extra, live] = await Promise.all([
+          fetchShapes(transit, [...used.values()], ctl.signal).catch(() => []),
+          fetchOsmBundles(hubBoxes, ctl.signal).catch((): (OsmBundle | null)[] => []),
+          followNow
+            ? fetchArrivals([...boarding.values()], ctl.signal).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+        return { rough, shapes, extra, live };
+      });
+
       try {
-        const [bundles, transit] = await Promise.all([bundlesPromise, transitPromise]);
+        const [bundles, transit, prep] = await Promise.all([
+          bundlesPromise,
+          transitPromise,
+          prepPromise,
+        ]);
         if (cancelled) return;
 
         let ctxs = bundles
           .filter((b): b is OsmBundle => !!b)
+          .filter((b) => b.ways.length > 0)
           .map((b) => contextOf(b, timeMs, showTrees, night))
           .filter((c): c is Ctx => !!c);
 
@@ -246,21 +296,28 @@ export function useRouting() {
             notices.push("대중교통 노선 정보를 불러오지 못했어요. 도보 경로만 보여드려요.");
           } else {
             /*
-             * 1차: 어느 노선을 볼지만 고른다. 아직 길 좌표가 없어 정류장을 곧장 이어
-             * 어림하지만, 그 좌표는 화면에 나가지 않는다 — 순위를 매기는 데만 쓴다.
+             * 1차 결과와 그에 딸린 것들(형상·환승지 보행로·실시간 도착)은
+             * 보행로를 기다리는 동안 이미 받아 두었다. 여기서는 붙이기만 한다.
              */
-            const rough = planTransit(transit, origin.p, destination.p, TRANSIT_CANDIDATES);
+            const rough = prep?.rough ?? [];
+            /** 실시간 버스 도착 — "지금" 을 보고 있을 때만 채워진다 */
+            let arrivals: ArrivalIndex | null = null;
+            if (prep) {
+              applyShapes(transit, prep.shapes);
 
-            // 그 노선들의 형상을 받는다. 통째로 미리 받기엔 응답이 너무 커진다
-            if (rough.length) {
-              const used = new Map<string, TransitPattern>();
-              for (const c of rough) for (const r of c.rides) used.set(r.pattern.id, r.pattern);
-              try {
-                applyShapes(transit, await fetchShapes(transit, [...used.values()], ctl.signal));
-              } catch {
-                /* 못 받으면 그 노선은 아래 2차에서 빠진다 */
+              const added = prep.extra
+                .filter((b): b is OsmBundle => !!b)
+                .filter((b) => b.ways.length > 0)
+                .map((b) => contextOf(b, timeMs, showTrees, night))
+                .filter((c): c is Ctx => !!c);
+              if (added.length) {
+                ctxs = [...ctxs, ...added];
+                shadeWalk = makeWalk(ctxs, weights);
+                fastWalk = makeWalk(ctxs, FASTEST_WEIGHTS);
               }
-              if (cancelled) return;
+
+              if (prep.live) arrivals = indexArrivals(prep.live);
+              if (prep.live?.notice) notices.push(prep.live.notice);
             }
 
             /*
@@ -283,64 +340,6 @@ export function useRouting() {
                   ? "이 구간을 잇는 노선을 찾지 못했어요."
                   : (transit.notice ?? "이 지역 버스 노선 정보를 받지 못해 지하철만 봅니다.")
               );
-            }
-            /*
-             * 실시간 버스 도착 — "지금" 을 보고 있을 때만 받는다.
-             * 시각 막대를 옮겨 다른 시각을 보는 중이라면 그때 무슨 차가 올지는 알 수 없으니
-             * 수단별 평균 배차로 되돌린다.
-             */
-            let arrivals: ArrivalIndex | null = null;
-            if (followNow && candidates.length) {
-              const boarding = new Map<string, TransitStop>();
-              for (const c of candidates) for (const r of c.rides) boarding.set(r.from.id, r.from);
-              try {
-                const got = await fetchArrivals([...boarding.values()], ctl.signal);
-                if (got) arrivals = indexArrivals(got);
-                if (got?.notice) notices.push(got.notice);
-              } catch {
-                /* 못 받아도 평균 배차로 안내하면 된다 — 굳이 알리지 않는다 */
-              }
-              if (cancelled) return;
-            }
-
-            /*
-             * 환승 지점 언저리의 보행로를 더 받아 온다.
-             *
-             * 환승은 출발·목적지에서 한참 떨어진 곳에서 일어난다 — 상도동 → 대치동이면
-             * 노들역에서 갈아타는데 거기는 출발지에서 1.7km 다. 그 언저리 길이 없으면
-             * 200m 짜리 환승 도보를 못 찾아 지하철 안내가 통째로 사라진다.
-             * 직선으로 이어 버릴 수는 없으니(없는 길이 생긴다) 필요한 곳만 더 받는다.
-             */
-            const hubs: LngLat[] = [];
-            for (const c of candidates) {
-              for (let k = 1; k < c.rides.length; k++) {
-                for (const p of [c.rides[k - 1].to.p, c.rides[k].from.p]) {
-                  if (ctxs.some((x) => bboxContains(x.bbox, p))) continue;
-                  if (hubs.some((h) => distMeters(h, p) < HUB_MERGE_M)) continue;
-                  hubs.push(p);
-                }
-              }
-            }
-            if (hubs.length) {
-              const extra = await Promise.all(
-                hubs.slice(0, MAX_HUB_BUNDLES).map((p) => {
-                  const box = padBBox(bboxOfPoints([p]), HUB_PAD_M);
-                  return fetchOsmBundle(
-                    [box.minLng, box.minLat, box.maxLng, box.maxLat],
-                    ctl.signal
-                  ).catch(() => null);
-                })
-              );
-              if (cancelled) return;
-              const added = extra
-                .filter((b): b is OsmBundle => !!b)
-                .map((b) => contextOf(b, timeMs, showTrees, night))
-                .filter((c): c is Ctx => !!c);
-              if (added.length) {
-                ctxs = [...ctxs, ...added];
-                shadeWalk = makeWalk(ctxs, weights);
-                fastWalk = makeWalk(ctxs, FASTEST_WEIGHTS);
-              }
             }
 
             // 지도(__map)·상태(__app)와 마찬가지로, 왜 이 노선이 뽑혔는지 콘솔에서 들여다볼 수 있게 한다
