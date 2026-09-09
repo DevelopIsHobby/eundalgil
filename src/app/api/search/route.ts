@@ -405,6 +405,46 @@ async function photon(q: string, bias: Bias, signal: AbortSignal): Promise<Place
     });
 }
 
+/** 지하철역으로 볼 만한 분류인지 — 버스정류장은 뺀다 */
+function looksLikeStation(hit: PlaceHit) {
+  const c = `${hit.category ?? ""}`.toLowerCase();
+  if (/bus|버스|정류/.test(c)) return false;
+  return /지하철|전철|철도|역사|subway|light_rail|railway|station|halt/.test(c);
+}
+
+/**
+ * "○○역" 을 치면 지하철역을 먼저 보여 준다.
+ *
+ * 역 이름은 정류장·출입구·도로 이름에도 그대로 들어간다. 그래서 "봉천역" 을 쳤을 때
+ * 2호선 봉천역 대신 **버스정류장**이 먼저 잡히는 일이 있었다. 목적지를 정류장으로
+ * 잡으면 거기서 역까지 걷는 시간이 통째로 빠져 안내가 어긋난다.
+ *
+ * 다른 질의의 순서는 건드리지 않는다 — "역" 으로 끝나는 질의에만 손댄다.
+ */
+function preferStations(q: string, hits: PlaceHit[], bias: Bias) {
+  if (!/역$/.test(q.trim())) return hits;
+  const bare = q.trim().replace(/\s+/g, "");
+  const rank = (h: PlaceHit) => {
+    const station = looksLikeStation(h);
+    const sameName = h.name.replace(/\s+/g, "") === bare;
+    if (station && sameName) return 0;
+    if (station) return 1;
+    if (sameName) return 2;
+    return 3;
+  };
+  /*
+   * 같은 이름의 역이 전국에 여럿이고, 한 역도 출처마다 따로 잡힌다.
+   * 그래서 같은 순위 안에서는 **지금 보고 있는 지도에서 가까운 것**을 먼저 둔다.
+   * 기준점이 없으면 원래 순서를 그대로 지킨다.
+   */
+  const away = (h: PlaceHit) =>
+    bias ? Math.hypot((h.lng - bias.lng) * 88, (h.lat - bias.lat) * 111) : 0;
+  return hits
+    .map((h, i) => ({ h, i, r: rank(h), d: away(h) }))
+    .sort((a, b) => a.r - b.r || a.d - b.d || a.i - b.i)
+    .map((x) => x.h);
+}
+
 /**
  * 여러 곳을 동시에 물어 한 건씩 번갈아 합친다.
  * 어느 하나가 죽어도 나머지 결과는 그대로 보여 준다.
@@ -428,7 +468,7 @@ async function search(q: string, bias: Bias, origin: string, signal: AbortSignal
   if (!settled.some((s) => s.status === "fulfilled")) {
     throw new Error("검색 서버에 연결하지 못했습니다.");
   }
-  return dedupe(interleave(groups)).slice(0, LIMIT);
+  return preferStations(q, dedupe(interleave(groups)), bias).slice(0, LIMIT);
 }
 
 export async function GET(req: NextRequest) {
