@@ -11,6 +11,7 @@ import {
 import type { OsmBundle, RawBuilding, RawTree, SafetyPoint, WalkWay } from "@/lib/osm";
 import { overpass, type OverpassElement } from "@/lib/overpass";
 import { readCachedBundle, writeCachedBundle } from "@/lib/osmCache";
+import { fetchVWorldBuildings, hasVWorldBuildings } from "@/lib/vworldBuildings";
 import { loadElevation, smoothProfile } from "@/lib/elevation";
 
 export const runtime = "nodejs";
@@ -54,11 +55,11 @@ const WALK_HIGHWAY =
  * 여러 범위를 union 으로 묶어 한 번에 물어봤더니 미러가 50초 만에 504 로 끊었다.
  * Overpass 는 쿼리가 무거워지면 급격히 느려진다 — 나눠서 **동시에** 묻는 편이 낫다.
  */
-function buildQuery(b: BBox) {
+function buildQuery(b: BBox, withBuildings: boolean) {
   const bb = `${b.minLat},${b.minLng},${b.maxLat},${b.maxLng}`;
   return `[out:json][timeout:40];
 (
-  way["building"](${bb});
+  ${withBuildings ? `way["building"](${bb});` : ""}
   node["natural"="tree"](${bb});
   way["highway"~"${WALK_HIGHWAY}"]["area"!~"yes"](${bb});
   way["natural"~"^(wood|scrub)$"](${bb});
@@ -259,7 +260,9 @@ export async function GET(req: NextRequest) {
   const shared = inflight.get(wanted);
   if (shared) return NextResponse.json({ bundles: await shared });
 
-  const run = collect(boxes).finally(() => inflight.delete(wanted));
+  // 브이월드 키는 등록한 도메인에서만 통한다. 서버에서 부를 때는 Referer 로 알려 줘야 한다
+  const referer = process.env.VWORLD_REFERER || req.nextUrl.origin;
+  const run = collect(boxes, referer).finally(() => inflight.delete(wanted));
   inflight.set(wanted, run);
 
   try {
@@ -269,7 +272,7 @@ export async function GET(req: NextRequest) {
   }
 }
 
-async function collect(boxes: BBox[]): Promise<(OsmBundle | null)[]> {
+async function collect(boxes: BBox[], referer: string): Promise<(OsmBundle | null)[]> {
   const now = Date.now();
   const bundles: (OsmBundle | null)[] = boxes.map((b) => {
     const hit = cache.get(keyOf(b));
@@ -294,8 +297,24 @@ async function collect(boxes: BBox[]): Promise<(OsmBundle | null)[]> {
       if (bundles[i]) return;
       let data: OsmBundle;
       try {
-        const elements = await overpass(buildQuery(box));
+        /*
+         * 건물은 브이월드(정부 건물통합정보)에서 받는다 — 훨씬 빠르고 층수까지 있다.
+         * Overpass 에서 건물을 빼면 남은 질의도 그만큼 가벼워지므로, 둘을 동시에 부른다.
+         * 브이월드가 안 되면 그때 Overpass 로 건물까지 다시 받는다.
+         */
+        const useVWorld = hasVWorldBuildings();
+        const [elements, vwBuildings] = await Promise.all([
+          overpass(buildQuery(box, !useVWorld)),
+          useVWorld ? fetchVWorldBuildings(box, referer) : Promise.resolve(null),
+        ]);
         data = bundleOf(elements, box, woodsOf(elements));
+        if (useVWorld) {
+          if (vwBuildings?.length) data.buildings = vwBuildings;
+          else {
+            console.warn("[osm] 브이월드 건물을 못 받아 OSM 으로 되돌아갑니다");
+            data.buildings = bundleOf(await overpass(buildQuery(box, true)), box, woodsOf(elements)).buildings;
+          }
+        }
       } catch (err) {
         console.warn("[osm]", (err as Error).message);
         /*
