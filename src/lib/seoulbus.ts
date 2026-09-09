@@ -12,7 +12,13 @@
  */
 
 import { distMeters, type LngLat } from "./geo";
-import type { TransitPattern, TransitStop } from "./transit";
+import {
+  ARRIVAL_HORIZON_S,
+  type Arrival,
+  type Headway,
+  type TransitPattern,
+  type TransitStop,
+} from "./transit";
 
 const BASE = "http://ws.bus.go.kr/api/rest";
 const TIMEOUT_MS = 7000;
@@ -125,6 +131,7 @@ async function nearbyStops(p: LngLat, radius: number): Promise<SeoulStop[]> {
         name: str(it.stationNm) || "이름 없는 정류장",
         p: [lng, lat],
         mode: "bus",
+        live: { src: "seoul", arsId },
       };
     })
     .filter((s): s is SeoulStop => !!s);
@@ -156,16 +163,21 @@ async function stopsOfRoute(routeId: string): Promise<RouteSeq | null> {
 
   const json = await call("busRouteInfo/getStaionByRoute", { busRouteId: routeId });
   const rows = itemsOf(json)
-    .map((it) => ({
-      seq: num(it.seq),
-      direction: str(it.direction),
-      stop: {
-        id: `sb${str(it.arsId) || str(it.station)}`,
-        name: str(it.stationNm) || "이름 없는 정류장",
-        p: [num(it.gpsX), num(it.gpsY)] as LngLat,
-        mode: "bus" as const,
-      },
-    }))
+    .map((it) => {
+      // 노선 조회는 정류소 고유번호를 arsId 로 준다. 실시간 도착을 물어볼 때 이 번호가 필요하다
+      const arsId = str(it.arsId) || str(it.station);
+      return {
+        seq: num(it.seq),
+        direction: str(it.direction),
+        stop: {
+          id: `sb${arsId}`,
+          name: str(it.stationNm) || "이름 없는 정류장",
+          p: [num(it.gpsX), num(it.gpsY)] as LngLat,
+          mode: "bus" as const,
+          live: { src: "seoul" as const, arsId },
+        },
+      };
+    })
     .filter((r) => Number.isFinite(r.stop.p[0]) && Number.isFinite(r.stop.p[1]))
     .sort((a, b) => a.seq - b.seq);
 
@@ -243,9 +255,66 @@ export async function fetchSeoulBuses(
         mode: "bus",
         headsign: stops.get(ids[ids.length - 1])?.name,
         stops: ids,
+        live: { src: "seoul", routeId },
       });
     });
   }
 
   return { stops: [...stops.values()], patterns };
+}
+
+export type LiveArrivals = { arrivals: Arrival[]; headways: Headway[] };
+
+/**
+ * 정류소 하나에 오는 **모든 노선**의 도착 예정을 한 번에 준다.
+ * (노선별로 따로 부르면 호출 수가 노선 수만큼 늘어난다)
+ *
+ * 응답은 노선 한 줄에 다음 차 두 대를 담아 준다 — traTime1/2 가 남은 초,
+ * arrmsg1/2 가 "2분후[2번째 전]" 같은 사람이 읽는 말이다.
+ */
+export async function fetchSeoulArrivals(stopId: string, arsId: string): Promise<LiveArrivals> {
+  const json = await call("stationinfo/getStationByUid", { arsId });
+  const arrivals: Arrival[] = [];
+  const headways: Headway[] = [];
+
+  for (const it of itemsOf(json)) {
+    const routeId = str(it.busRouteId);
+    if (!routeId) continue;
+
+    // term 은 배차간격(분). 오는 차가 안 잡힐 때 평균 대기를 이 값으로 대신한다
+    const term = num(it.term);
+    if (Number.isFinite(term) && term > 0) headways.push({ stopId, routeId, minutes: term });
+
+    // 이 정류소가 노선의 몇 번째인지 — 차가 있는 구간 번호와 빼면 "몇 정거장 전" 이다
+    const staOrd = num(it.staOrd);
+
+    for (const i of [1, 2] as const) {
+      const raw = num(it[`traTime${i}`]);
+      const message = str(it[`arrmsg${i}`]);
+      if (!Number.isFinite(raw) || raw <= 0 || raw > ARRIVAL_HORIZON_S) continue;
+      // 탈 수 없는 상태는 버린다
+      if (/운행종료|출발대기/.test(message)) continue;
+      /*
+       * "곧 도착" 인데 traTime 은 3분쯤으로 오는 경우가 있다 (주행 예측이 늦게 따라온다).
+       * 그 값을 그대로 믿으면 이미 떠난 차를 잡아 탄다고 계산하게 되므로 문구를 우선한다.
+       */
+      const sec = /곧 도착/.test(message) ? Math.min(raw, 30) : raw;
+      const sectOrd = num(it[`sectOrd${i}`]);
+      arrivals.push({
+        stopId,
+        routeId,
+        sec,
+        stopsAway:
+          Number.isFinite(staOrd) && Number.isFinite(sectOrd)
+            ? Math.max(0, staOrd - sectOrd)
+            : undefined,
+        message: message || undefined,
+        full: str(it[`isFullFlag${i}`]) === "1",
+        last: str(it[`isLast${i}`]) === "1",
+        lowFloor: str(it[`busType${i}`]) === "1",
+      });
+    }
+  }
+
+  return { arrivals, headways };
 }

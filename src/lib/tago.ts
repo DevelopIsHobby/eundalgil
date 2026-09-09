@@ -14,10 +14,17 @@
  */
 
 import { distMeters, type LngLat } from "./geo";
-import type { TransitPattern, TransitStop } from "./transit";
+import {
+  ARRIVAL_HORIZON_S,
+  type Arrival,
+  type Headway,
+  type TransitPattern,
+  type TransitStop,
+} from "./transit";
 
 const BASE_STOP = "https://apis.data.go.kr/1613000/BusSttnInfoInqireService";
 const BASE_ROUTE = "https://apis.data.go.kr/1613000/BusRouteInfoInqireService";
+const BASE_ARRIVAL = "https://apis.data.go.kr/1613000/ArvlInfoInqireService";
 
 const TIMEOUT_MS = 7000;
 /** 노선이 지나는 정류소 순서는 거의 바뀌지 않는다 */
@@ -263,7 +270,14 @@ export async function fetchTagoBuses(
       if (group.length < 2) return;
       const ids: string[] = [];
       for (const s of group) {
-        if (!stops.has(s.id)) stops.set(s.id, { id: s.id, name: s.name, p: s.p, mode: "bus" });
+        if (!stops.has(s.id))
+          stops.set(s.id, {
+            id: s.id,
+            name: s.name,
+            p: s.p,
+            mode: "bus",
+            live: { src: "tago", cityCode: s.cityCode, nodeId: s.nodeId },
+          });
         if (ids[ids.length - 1] !== s.id) ids.push(s.id);
       }
       if (ids.length < 2) return;
@@ -274,9 +288,43 @@ export async function fetchTagoBuses(
         mode: "bus",
         headsign: stops.get(ids[ids.length - 1])?.name,
         stops: ids,
+        live: { src: "tago", routeId: route.routeId },
       });
     });
   }
 
   return { stops: [...stops.values()], patterns };
+}
+
+/**
+ * 정류소 하나에 오는 **모든 노선**의 도착 예정.
+ * 서울 TOPIS 와 달리 배차간격은 주지 않고, 차 한 대가 한 줄로 온다.
+ */
+export async function fetchTagoArrivals(
+  stopId: string,
+  cityCode: string,
+  nodeId: string
+): Promise<{ arrivals: Arrival[]; headways: Headway[] }> {
+  const json = await call(BASE_ARRIVAL, "getSttnAcctoArvlPrearngeInfoList", {
+    cityCode,
+    nodeId,
+    numOfRows: 60,
+    pageNo: 1,
+  });
+
+  const arrivals: Arrival[] = [];
+  for (const it of itemsOf(json)) {
+    const routeId = str(it.routeid);
+    const sec = num(it.arrtime);
+    if (!routeId || !Number.isFinite(sec) || sec <= 0 || sec > ARRIVAL_HORIZON_S) continue;
+    const away = num(it.arrprevstationcnt);
+    arrivals.push({
+      stopId,
+      routeId,
+      sec,
+      stopsAway: Number.isFinite(away) ? away : undefined,
+      lowFloor: str(it.vehicletp).includes("저상"),
+    });
+  }
+  return { arrivals, headways: [] };
 }

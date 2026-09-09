@@ -10,11 +10,24 @@ import { distMeters, type LngLat } from "./geo";
 
 export type TransitMode = "bus" | "subway" | "tram" | "train";
 
+/**
+ * 실시간 도착정보를 물어볼 때 쓰는 원본 식별자.
+ * 서울(TOPIS)은 정류소 고유번호(arsId), 그 밖(TAGO)은 도시코드 + 정류소 id 가 있어야 부른다.
+ */
+export type StopLive =
+  | { src: "seoul"; arsId: string }
+  | { src: "tago"; cityCode: string; nodeId: string };
+
+/** 도착정보 응답을 노선에 맞춰 붙일 때 쓰는 노선 식별자 */
+export type PatternLive = { src: "seoul" | "tago"; routeId: string };
+
 export type TransitStop = {
   id: string;
   name: string;
   p: LngLat;
   mode: TransitMode;
+  /** 버스만 붙는다 — 지하철은 실시간 도착을 받지 않는다 */
+  live?: StopLive;
 };
 
 export type TransitPattern = {
@@ -28,6 +41,8 @@ export type TransitPattern = {
   headsign?: string;
   /** 정류장 id 를 지나는 순서대로 */
   stops: string[];
+  /** 버스만 — 실시간 도착정보를 이 노선에 맞춰 붙일 때 쓴다 */
+  live?: PatternLive;
 };
 
 export type TransitData = {
@@ -115,10 +130,104 @@ export async function fetchTransit(
   return res.json();
 }
 
+/* ─────────────────────────── 실시간 도착정보 ─────────────────────────── */
+
+/**
+ * "지금 오고 있는 차" 로 볼 최대 남은 시간(초).
+ * 이보다 먼 예측은 배차간격 어림값과 다를 게 없어 쓰지 않는다.
+ */
+export const ARRIVAL_HORIZON_S = 45 * 60;
+
+/**
+ * 정류장에 닿는 시각이 도착정보를 받은 때로부터 이보다 뒤면 실시간을 쓰지 않는다.
+ * (환승 두 번째 구간처럼 30분 뒤에 탈 차는 지금 예측에 잡히지 않는다)
+ */
+export const LIVE_USABLE_S = 30 * 60;
+
+/** 차를 놓치지 않으려면 도착보다 이만큼은 먼저 정류장에 있어야 한다(초) */
+export const BOARD_MARGIN_S = 20;
+
+/** 정류장으로 다가오는 차 한 대 */
+export type Arrival = {
+  stopId: string;
+  /** pattern.live.routeId 와 맞춘다 */
+  routeId: string;
+  /** 받은 시각(ArrivalData.fetchedAt)부터 도착까지 남은 시간(초) */
+  sec: number;
+  /** 몇 정류장 전에 있는지 */
+  stopsAway?: number;
+  /** "2분후[2번째 전]" 같은 원문 — 있으면 그대로 보여 준다 */
+  message?: string;
+  full?: boolean;
+  last?: boolean;
+  /** 저상버스 */
+  lowFloor?: boolean;
+};
+
+/** 노선의 배차간격(분) — 실시간 차가 안 잡힐 때 평균 대기를 이 값으로 대신한다 */
+export type Headway = { stopId: string; routeId: string; minutes: number };
+
+export type ArrivalData = {
+  arrivals: Arrival[];
+  headways: Headway[];
+  /** sec 는 이 시각 기준이다 */
+  fetchedAt: number;
+  /** 못 받았으면 그 이유 */
+  notice?: string;
+};
+
+export type ArrivalIndex = {
+  fetchedAt: number;
+  /** 이 정류장에 오는 이 노선의 차들 — 이른 순 */
+  buses: (stopId: string, routeId: string) => Arrival[];
+  /** 배차간격(초). 모르면 undefined */
+  headwaySec: (stopId: string, routeId: string) => number | undefined;
+};
+
+export function indexArrivals(data: ArrivalData): ArrivalIndex {
+  const buses = new Map<string, Arrival[]>();
+  for (const a of data.arrivals) {
+    const key = `${a.stopId}|${a.routeId}`;
+    const list = buses.get(key);
+    if (list) list.push(a);
+    else buses.set(key, [a]);
+  }
+  for (const list of buses.values()) list.sort((x, y) => x.sec - y.sec);
+
+  const head = new Map<string, number>();
+  for (const h of data.headways) head.set(`${h.stopId}|${h.routeId}`, h.minutes * 60);
+
+  return {
+    fetchedAt: data.fetchedAt,
+    buses: (stopId, routeId) => buses.get(`${stopId}|${routeId}`) ?? [],
+    headwaySec: (stopId, routeId) => head.get(`${stopId}|${routeId}`),
+  };
+}
+
+/** 정류장 여러 곳의 실시간 도착정보를 한 번에 받아 온다 */
+export async function fetchArrivals(
+  stops: TransitStop[],
+  signal?: AbortSignal
+): Promise<ArrivalData | null> {
+  const wanted = stops.filter((s) => s.live);
+  if (!wanted.length) return null;
+  const res = await fetch("/api/arrivals", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ stops: wanted.map((s) => ({ id: s.id, live: s.live })) }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`실시간 도착정보를 불러오지 못했습니다 (${res.status})`);
+  return res.json();
+}
+
 export type RideSpec = {
   pattern: TransitPattern;
-  /** 같은 정류장 사이를 오가는 다른 노선 번호 — 먼저 오는 걸 타면 된다 */
-  altRefs?: string[];
+  /**
+   * 같은 정류장 사이를 함께 다니는 다른 노선 — 먼저 오는 걸 타면 된다.
+   * 실시간 정보가 있으면 이 중 가장 빨리 오는 차로 대기 시간을 잡는다.
+   */
+  alts?: { ref: string; live?: PatternLive }[];
   from: TransitStop;
   to: TransitStop;
   /** 타는 정류장을 뺀 정차 수 */
@@ -342,10 +451,11 @@ export function planTransit(
       continue;
     }
     prev.rides.forEach((ride, i) => {
-      const ref = c.rides[i]?.pattern.ref;
-      if (!ref || ref === ride.pattern.ref) return;
-      ride.altRefs ??= [];
-      if (!ride.altRefs.includes(ref) && ride.altRefs.length < 4) ride.altRefs.push(ref);
+      const alt = c.rides[i]?.pattern;
+      if (!alt?.ref || alt.ref === ride.pattern.ref) return;
+      ride.alts ??= [];
+      if (!ride.alts.some((a) => a.ref === alt.ref) && ride.alts.length < 4)
+        ride.alts.push({ ref: alt.ref, live: alt.live });
     });
   }
   return [...seen.values()];

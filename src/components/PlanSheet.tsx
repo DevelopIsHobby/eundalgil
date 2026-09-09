@@ -104,10 +104,27 @@ function WalkLegRow({ leg }: { leg: WalkLeg }) {
   );
 }
 
+/** 실시간 도착 옆에 붙는 작은 표시 (저상·만차·막차) */
+function LiveTag({ children, warn }: { children: React.ReactNode; warn?: boolean }) {
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-[11px] font-bold ${
+        warn ? "bg-[#FFF3F1] text-[#C33C29]" : "bg-[#F2F4F6] text-ink-500"
+      }`}
+    >
+      {children}
+    </span>
+  );
+}
+
 function RideLegRow({ leg }: { leg: RideLeg }) {
-  const { ride, seat } = leg;
+  const { ride, seat, live } = leg;
   const color = rideColor(leg);
   const waitMin = Math.round((leg.startMs - leg.arriveMs) / 60000);
+  /** 배차간격으로 어림한 값은 실시간이 아니다 — 그때는 평균이라고 말해야 한다 */
+  const realtime = live && !live.fromHeadway ? live : null;
+  /** 같은 구간을 함께 다니는 노선 중 실제로 먼저 오는 번호 */
+  const firstRef = realtime?.ref;
   return (
     <li className="flex gap-3">
       <div className="flex w-11 shrink-0 flex-col items-center">
@@ -136,22 +153,45 @@ function RideLegRow({ leg }: { leg: RideLeg }) {
           >
             {ride.pattern.ref || ride.pattern.name}
           </span>
-          {ride.altRefs?.map((ref) => (
+          {ride.alts?.map((alt) => (
             <span
-              key={ref}
+              key={alt.ref}
               className="rounded-md border px-1.5 py-0.5 text-[12px] font-bold"
               style={{ borderColor: color, color }}
               title="같은 구간을 다니는 다른 노선"
             >
-              {ref}
+              {alt.ref}
             </span>
           ))}
           <span className="text-[12px] text-ink-400">
-            {ride.altRefs?.length ? "중 먼저 오는 것 · " : ""}
+            {ride.alts?.length ? "중 먼저 오는 것 · " : ""}
             {MODE_LABEL[ride.pattern.mode]}
             {ride.pattern.headsign ? ` · ${ride.pattern.headsign} 방면` : ""}
           </span>
         </div>
+
+        {realtime && (
+          <p className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1">
+            <span className="inline-flex items-center gap-1 rounded-md bg-brand-soft px-1.5 py-0.5 text-[11px] font-bold text-brand">
+              <span className="h-[6px] w-[6px] rounded-full bg-brand" />
+              실시간
+            </span>
+            <span className="text-[13px] font-bold tabular-nums">
+              {/* 같은 구간을 다니는 다른 노선이 먼저 오면 그 번호를 말해 준다 */}
+              {firstRef && firstRef !== ride.pattern.ref ? `${firstRef}번이 먼저 · ` : ""}
+              {/* "N분 후" 라고 쓰면 걸어가는 시간과 헷갈린다. 정류장에서 기다리는 시간이다 */}
+              {waitMin <= 0 ? "기다림 없이 바로 탑승" : `정류장에서 ${waitMin}분 대기`}
+            </span>
+            {realtime.stopsAway != null && (
+              <span className="text-[12px] tabular-nums text-ink-400">
+                {realtime.stopsAway > 0 ? `지금 ${realtime.stopsAway}정거장 전` : "지금 도착 중"}
+              </span>
+            )}
+            {realtime.lowFloor && <LiveTag>저상</LiveTag>}
+            {realtime.full && <LiveTag warn>만차</LiveTag>}
+            {realtime.last && <LiveTag warn>막차</LiveTag>}
+          </p>
+        )}
 
         {/* 자리 추천 */}
         <div className="mt-2.5 flex items-start gap-2.5 rounded-xl bg-[#F7F8F9] p-3">
@@ -183,7 +223,12 @@ function RideLegRow({ leg }: { leg: RideLeg }) {
 
         <p className="mt-2 text-[13px] text-ink-500 tabular-nums">
           {ride.stopCount}개 정류장 · {formatDuration(ride.rideSec)}
-          {waitMin > 0 && <span className="text-ink-400"> · 평균 대기 {waitMin}분</span>}
+          {waitMin > 0 && (
+            <span className="text-ink-400">
+              {" · "}
+              {realtime ? "대기" : "평균 대기"} {waitMin}분
+            </span>
+          )}
         </p>
         <p className="mt-1.5 text-[15px] font-bold">{ride.to.name} 하차</p>
       </div>

@@ -6,7 +6,18 @@
 import type { LngLat } from "./geo";
 import type { RouteOption, RouteResult } from "./router";
 import { seatAdvice, type SeatAdvice } from "./seat";
-import { MODE_FARE, MODE_LABEL, type RideSpec, type TransitCandidate } from "./transit";
+import {
+  BOARD_MARGIN_S,
+  LIVE_USABLE_S,
+  MODE_FARE,
+  MODE_LABEL,
+  MODE_WAIT,
+  type Arrival,
+  type ArrivalIndex,
+  type PatternLive,
+  type RideSpec,
+  type TransitCandidate,
+} from "./transit";
 
 export type WalkLeg = {
   type: "walk";
@@ -18,14 +29,35 @@ export type WalkLeg = {
   startMs: number;
 };
 
+/**
+ * 평균 대기가 아니라 실제 도착정보로 대기 시간을 잡았을 때, 무슨 차를 기다리는지.
+ * 없으면 수단별 평균값(MODE_WAIT)을 쓴 것이다.
+ */
+export type LiveWait = {
+  /** 차가 정류장에 닿는 시각 */
+  arrivalMs: number;
+  /** 실제로 타게 되는 노선 번호 — 같은 구간을 다니는 다른 노선이 먼저 올 수 있다 */
+  ref?: string;
+  /** "2분후[2번째 전]" 같은 원문 */
+  message?: string;
+  stopsAway?: number;
+  full?: boolean;
+  last?: boolean;
+  lowFloor?: boolean;
+  /** 오는 차가 안 잡혀 그 노선의 배차간격으로 어림한 값 */
+  fromHeadway?: boolean;
+};
+
 export type RideLeg = {
   type: "ride";
   ride: RideSpec;
   seat: SeatAdvice;
   /** 정류장 도착 시각 */
   arriveMs: number;
-  /** 승차 시각 (도착 + 평균 대기) */
+  /** 승차 시각 (정류장 도착 + 대기) */
   startMs: number;
+  /** 실시간 도착정보로 대기를 잡았다면 그 내용 */
+  live?: LiveWait;
 };
 
 export type Leg = WalkLeg | RideLeg;
@@ -111,6 +143,86 @@ export function buildWalkPlan(
   };
 }
 
+/** 이 구간을 함께 다니는 노선들 — 실시간이 있으면 이 중 먼저 오는 걸 탄다 */
+function liveRoutes(ride: RideSpec) {
+  return [{ ref: ride.pattern.ref, live: ride.pattern.live }, ...(ride.alts ?? [])].filter(
+    (r): r is { ref: string; live: PatternLive } => !!r.live
+  );
+}
+
+/** 오는 차가 안 잡힐 때 — 배차간격의 절반을 기다린다고 본다 */
+function headwayWait(
+  routes: { ref: string; live: PatternLive }[],
+  stopId: string,
+  live: ArrivalIndex
+) {
+  let best: { sec: number; ref: string } | null = null;
+  for (const r of routes) {
+    const term = live.headwaySec(stopId, r.live.routeId);
+    if (term == null) continue;
+    const sec = term / 2;
+    if (!best || sec < best.sec) best = { sec, ref: r.ref };
+  }
+  return best;
+}
+
+/**
+ * 정류장에 닿는 시각(arriveMs)에 실제로 탈 수 있는 차를 골라 대기 시간을 낸다.
+ *
+ * 실시간 정보에는 지금 오고 있는 차만 잡히므로, 한참 뒤에 타는 환승 구간이나
+ * 정보가 없는 노선은 평균 대기(MODE_WAIT)로 되돌린다. 배차간격이라도 알면
+ * 그 절반을 쓴다 — 모든 노선에 똑같은 4분을 얹는 것보다 실제에 가깝다.
+ */
+function waitFor(
+  ride: RideSpec,
+  arriveMs: number,
+  live: ArrivalIndex | null
+): { sec: number; live?: LiveWait } {
+  const average = MODE_WAIT[ride.pattern.mode];
+  // 지하철은 실시간 도착을 받지 않는다 (그래서 늘 평균 배차다)
+  if (!live || ride.pattern.mode !== "bus") return { sec: average };
+
+  const routes = liveRoutes(ride);
+  if (!routes.length) return { sec: average };
+
+  const byHeadway = () => {
+    const head = headwayWait(routes, ride.from.id, live);
+    if (!head) return { sec: average };
+    return {
+      sec: head.sec,
+      live: { arrivalMs: arriveMs + head.sec * 1000, ref: head.ref, fromHeadway: true },
+    };
+  };
+
+  // 너무 먼 미래에 탈 차는 지금 예측에 잡히지 않는다
+  if (arriveMs - live.fetchedAt > LIVE_USABLE_S * 1000) return byHeadway();
+
+  let best: { arrivalMs: number; ref: string; bus: Arrival } | null = null;
+  for (const r of routes) {
+    for (const bus of live.buses(ride.from.id, r.live.routeId)) {
+      const arrivalMs = live.fetchedAt + bus.sec * 1000;
+      // 우리가 정류장에 닿기 전에 지나가 버리는 차는 못 탄다
+      if (arrivalMs < arriveMs + BOARD_MARGIN_S * 1000) continue;
+      if (!best || arrivalMs < best.arrivalMs) best = { arrivalMs, ref: r.ref, bus };
+      break; // 노선별 목록은 이른 순이라 탈 수 있는 첫 차만 보면 된다
+    }
+  }
+  if (!best) return byHeadway();
+
+  return {
+    sec: Math.max(0, (best.arrivalMs - arriveMs) / 1000),
+    live: {
+      arrivalMs: best.arrivalMs,
+      ref: best.ref,
+      message: best.bus.message,
+      stopsAway: best.bus.stopsAway,
+      full: best.bus.full,
+      last: best.bus.last,
+      lowFloor: best.bus.lowFloor,
+    },
+  };
+}
+
 export function buildTransitPlan(
   cand: TransitCandidate,
   opts: {
@@ -121,6 +233,8 @@ export function buildTransitPlan(
     startMs: number;
     style: PlanStyle;
     walk: WalkFn;
+    /** 실시간 도착정보 — "지금" 을 보고 있을 때만 들어온다 */
+    arrivals?: ArrivalIndex | null;
   }
 ): Plan | null {
   const legs: Leg[] = [];
@@ -151,13 +265,15 @@ export function buildTransitPlan(
   for (const ride of cand.rides as RideSpec[]) {
     if (!pushWalk(ride.from.p, ride.from.name)) return null;
     const arriveMs = clock;
-    const boardMs = arriveMs + ride.waitSec * 1000;
+    const wait = waitFor(ride, arriveMs, opts.arrivals ?? null);
+    const boardMs = arriveMs + wait.sec * 1000;
     legs.push({
       type: "ride",
       ride,
       seat: seatAdvice(ride.path, boardMs, ride.rideSec),
       arriveMs,
       startMs: boardMs,
+      live: wait.live,
     });
     clock = boardMs + ride.rideSec * 1000;
     cursor = ride.to.p;

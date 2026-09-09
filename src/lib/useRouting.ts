@@ -20,7 +20,14 @@ import {
 } from "./router";
 import { FASTEST_WEIGHTS, weightsFromPrefs, type RouteWeights } from "./prefs";
 import { buildTransitPlan, buildWalkPlan, type PlanPair, type WalkFn } from "./plan";
-import { fetchTransit, planTransit } from "./transit";
+import {
+  fetchArrivals,
+  fetchTransit,
+  indexArrivals,
+  planTransit,
+  type ArrivalIndex,
+  type TransitStop,
+} from "./transit";
 
 /** 도보 단독 경로 상한 — 이보다 멀면 받아야 할 데이터가 급격히 커진다 */
 const MAX_WALK_M = 5000;
@@ -92,6 +99,8 @@ export function useRouting() {
   const timeMs = useDebounced(rawTimeMs, 350);
   const prefs = useApp((s) => s.prefs);
   const showTrees = useApp((s) => s.showTrees);
+  /** 시각 막대가 "실시간" 인지 — 이때만 버스 도착 예정을 받아 쓴다 */
+  const followNow = useApp((s) => s.followNow);
 
   useEffect(() => {
     const store = useApp.getState();
@@ -162,10 +171,16 @@ export function useRouting() {
 
         const shadeWalk = makeWalk(ctxs, weights);
         const fastWalk = makeWalk(ctxs, FASTEST_WEIGHTS);
+        /*
+         * "지금" 을 보고 있으면 계산에도 진짜 지금을 쓴다.
+         * 시각 막대는 값을 스스로 갱신하지 않아 timeMs 가 몇 분씩 묵을 수 있는데,
+         * 그 값으로 실시간 도착을 맞추면 이미 지나간 차를 타는 안내가 나온다.
+         */
+        const startMs = followNow ? Date.now() : timeMs;
         const meta = {
           originName: origin.name,
           destName: destination.name,
-          startMs: timeMs,
+          startMs,
         };
 
         const pairs: PlanPair[] = [];
@@ -222,9 +237,28 @@ export function useRouting() {
                   : (transit.notice ?? "이 지역 버스 노선 정보를 받지 못해 지하철만 봅니다.")
               );
             }
+            /*
+             * 실시간 버스 도착 — "지금" 을 보고 있을 때만 받는다.
+             * 시각 막대를 옮겨 다른 시각을 보는 중이라면 그때 무슨 차가 올지는 알 수 없으니
+             * 수단별 평균 배차로 되돌린다.
+             */
+            let arrivals: ArrivalIndex | null = null;
+            if (followNow && candidates.length) {
+              const boarding = new Map<string, TransitStop>();
+              for (const c of candidates) for (const r of c.rides) boarding.set(r.from.id, r.from);
+              try {
+                const got = await fetchArrivals([...boarding.values()], ctl.signal);
+                if (got) arrivals = indexArrivals(got);
+                if (got?.notice) notices.push(got.notice);
+              } catch {
+                /* 못 받아도 평균 배차로 안내하면 된다 — 굳이 알리지 않는다 */
+              }
+              if (cancelled) return;
+            }
+
             let dropped = 0;
             for (const cand of candidates) {
-              const base = { ...meta, origin: origin.p, destination: destination.p };
+              const base = { ...meta, origin: origin.p, destination: destination.p, arrivals };
               const shade = buildTransitPlan(cand, { ...base, style: "shade", walk: shadeWalk });
               const fast = buildTransitPlan(cand, { ...base, style: "fast", walk: fastWalk });
               // 정류장까지 걸어갈 길이 없는 조합은 버린다
@@ -272,5 +306,5 @@ export function useRouting() {
       cancelled = true;
       ctl.abort();
     };
-  }, [origin, destination, timeMs, prefs, showTrees]);
+  }, [origin, destination, timeMs, prefs, showTrees, followNow]);
 }
