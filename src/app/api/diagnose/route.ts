@@ -4,6 +4,7 @@ import { ShadeIndex, buildShadows } from "@/lib/shadow";
 import { applyShade, buildGraph, findRoutes } from "@/lib/router";
 import { DEFAULT_PREFS, weightsFromPrefs, type Prefs } from "@/lib/prefs";
 import { planTransit, type TransitData } from "@/lib/transit";
+import { cacheStats } from "@/lib/osmCache";
 import { bboxOfPoints, padBBox, distMeters } from "@/lib/geo";
 import type { OsmBundle } from "@/lib/osm";
 import type { LngLat } from "@/lib/geo";
@@ -34,7 +35,15 @@ export async function GET(req: Request) {
     `${base}/api/osm?bbox=${[box.minLng, box.minLat, box.maxLng, box.maxLat].join(",")}`
   );
   if (!res.ok) return new NextResponse(await res.text(), { status: 500 });
-  const bundle = (await res.json()) as OsmBundle;
+  // /api/osm 은 bbox 를 여러 개 받고 `{ bundles: [...] }` 로 돌려준다.
+  // 여기서는 한 덩어리만 쓰므로 첫 칸을 꺼낸다 (실패한 칸은 null 이다).
+  const { bundles } = (await res.json()) as { bundles?: (OsmBundle | null)[] };
+  const bundle = bundles?.[0];
+  if (!bundle) {
+    return new NextResponse("이 범위의 지도 데이터를 받지 못했습니다 (Overpass 응답 없음)", {
+      status: 503,
+    });
+  }
   const tFetch = Date.now();
 
   const mid: LngLat = [(origin[0] + dest[0]) / 2, (origin[1] + dest[1]) / 2];
@@ -123,6 +132,8 @@ export async function GET(req: Request) {
       path: x.path.filter((_, i) => i % 5 === 0 || i === x.path.length - 1),
     })),
     prefs,
+    // 디스크 캐시가 얼마나 쌓였는지 — 느릴 때 캐시 탓인지 Overpass 탓인지 가른다
+    osmCache: await cacheStats(),
     transit,
     error: r.error ?? null,
     msec: { fetch: tFetch - t0, shadow: tShadow - tFetch, graph: tGraph - tShadow, route: tRoute - tGraph },

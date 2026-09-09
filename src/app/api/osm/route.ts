@@ -10,6 +10,7 @@ import {
 } from "@/lib/geo";
 import type { OsmBundle, RawBuilding, RawTree, SafetyPoint, WalkWay } from "@/lib/osm";
 import { overpass, type OverpassElement } from "@/lib/overpass";
+import { readCachedBundle, writeCachedBundle } from "@/lib/osmCache";
 import { loadElevation, smoothProfile } from "@/lib/elevation";
 
 export const runtime = "nodejs";
@@ -275,7 +276,19 @@ async function collect(boxes: BBox[]): Promise<(OsmBundle | null)[]> {
     return hit && now - hit.at < CACHE_TTL_MS ? hit.data : null;
   });
 
-  // 범위마다 따로, 그러나 동시에 묻는다. 하나가 실패해도 나머지는 쓴다
+  // 메모리에 없으면 디스크를 본다 (서버를 다시 띄워도 가 본 동네는 그대로 쓴다)
+  await Promise.all(
+    boxes.map(async (box, i) => {
+      if (bundles[i]) return;
+      const saved = await readCachedBundle(keyOf(box));
+      if (saved) {
+        bundles[i] = saved;
+        cache.set(keyOf(box), { at: now, data: saved });
+      }
+    })
+  );
+
+  // 그래도 없는 범위만 Overpass 에 묻는다. 하나가 실패해도 나머지는 쓴다
   await Promise.all(
     boxes.map(async (box, i) => {
       if (bundles[i]) return;
@@ -285,6 +298,16 @@ async function collect(boxes: BBox[]): Promise<(OsmBundle | null)[]> {
         data = bundleOf(elements, box, woodsOf(elements));
       } catch (err) {
         console.warn("[osm]", (err as Error).message);
+        /*
+         * 공개 Overpass 는 붐비면 통째로 못 쓰는 때가 있다. 그럴 때 "지도 없음" 으로
+         * 끝내는 대신, 지난번에 받아 둔 것을 (좀 지났더라도) 그대로 쓴다.
+         * 건물과 길이 며칠 사이에 달라지지는 않는다.
+         */
+        const stale = await readCachedBundle(keyOf(box), true);
+        if (stale) {
+          console.warn("[osm] 지난번에 받아 둔 자료로 대신합니다");
+          bundles[i] = stale;
+        }
         return;
       }
 
@@ -298,7 +321,10 @@ async function collect(boxes: BBox[]): Promise<(OsmBundle | null)[]> {
 
       bundles[i] = data;
       // 길도 건물도 없으면 제대로 받은 게 아니다. 12시간 캐시에 남기면 두고두고 잘못 안내한다
-      if (data.ways.length || data.buildings.length) cache.set(keyOf(box), { at: now, data });
+      if (data.ways.length || data.buildings.length) {
+        cache.set(keyOf(box), { at: now, data });
+        void writeCachedBundle(keyOf(box), data);
+      }
     })
   );
 
