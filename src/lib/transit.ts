@@ -116,15 +116,20 @@ export const SEARCH_RADIUS_M = Math.max(...Object.values(ACCESS_RADIUS_M));
 
 /**
  * 한쪽 끝에서 고를 정류장 수 — 수단마다 따로 센다.
- * 가까운 순으로만 자르면 12개가 전부 반경 300m 안에서 채워져, 조금 걸어 나가면 있는
- * 큰 정류장(상도역 앞 같은)이 통째로 빠진다. 그래서 거리 구간별로 몫을 나눠 뽑는다.
- * 실제 사람들도 좋은 노선을 타려고 10분쯤은 걸어 나간다.
+ *
+ * 가까운 순으로 자르면 안 된다. 봉천역 앞처럼 같은 이름 정류장이 촘촘한 곳에서는
+ * 가장 가까운 여섯 곳이 전부 "봉천역" 으로 채워지고, 정작 타야 할 노선이 서는
+ * "봉천역.관악초등학교"(162m)가 밀려난다. 실제로 500번 직행이 후보에서 빠져
+ * 환승 경로가 추천되던 버그가 여기서 났다.
+ *
+ * 그래서 **노선을 기준으로 고른다** — 가까운 순으로 보되, 이미 잡은 정류장에 없는
+ * 노선을 하나라도 더해 주는 곳만 남긴다.
+ *
+ * 가장 가까운 두 곳은 노선이 겹쳐도 남긴다 — "코앞에서 타기" 는 사람들이 실제로 하는
+ * 선택이라, 노선이 이미 잡혀 있다는 이유로 지울 것이 아니다.
  */
-const ACCESS_BANDS: [limit: number, quota: number][] = [
-  [400, 6],
-  [800, 3],
-  [Infinity, 3],
-];
+const MAX_ACCESS_PER_MODE = 12;
+const ALWAYS_NEAREST = 2;
 /** 환승 도보로 인정하는 최대 직선거리(m) */
 export const TRANSFER_RADIUS_M = 260;
 /** 도보 추정용 — 직선거리에 곱하는 우회 계수 */
@@ -434,15 +439,16 @@ export function planTransit(
     const out: { s: TransitStop; d: number }[] = [];
     for (const arr of byMode.values()) {
       arr.sort((x, y) => x.d - y.d);
-      let from = 0;
-      for (const [limit, quota] of ACCESS_BANDS) {
-        let taken = 0;
-        for (const item of arr) {
-          if (item.d <= from || item.d > limit) continue;
-          out.push(item);
-          if (++taken >= quota) break;
-        }
-        from = limit;
+      const covered = new Set<string>();
+      let taken = 0;
+      for (const item of arr) {
+        if (taken >= MAX_ACCESS_PER_MODE) break;
+        const here = boardings.get(item.s.id) ?? [];
+        const adds = here.some((b) => !covered.has(b.pattern.id));
+        if (taken >= ALWAYS_NEAREST && !adds) continue;
+        for (const b of here) covered.add(b.pattern.id);
+        out.push(item);
+        taken++;
       }
     }
     return out.sort((a, b) => a.d - b.d);
