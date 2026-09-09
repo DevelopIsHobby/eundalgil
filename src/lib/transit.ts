@@ -286,53 +286,81 @@ export type TransitCandidate = {
 
 const walkSec = (meters: number) => (meters * WALK_DETOUR) / WALK_MPS;
 
+/**
+ * 길 좌표가 없을 때 쓰는 어림 구간 — 정류장을 곧장 이은 것이다.
+ * **순위를 매기는 1차 계산에만 쓰고 화면에는 내보내지 않는다.**
+ * 이 좌표가 그대로 그려지면 지도에 없는 직선 도로가 생긴다.
+ */
+function roughRide(
+  pattern: TransitPattern,
+  stopsById: Map<string, TransitStop>,
+  i: number,
+  j: number,
+  from: TransitStop,
+  to: TransitStop
+): RideSpec | null {
+  const path: LngLat[] = [];
+  let distance = 0;
+  let prev: LngLat | null = null;
+  for (let k = i; k <= j; k++) {
+    const s = stopsById.get(pattern.stops[k]);
+    if (!s) continue;
+    if (prev) distance += distMeters(prev, s.p);
+    path.push(s.p);
+    prev = s.p;
+  }
+  if (path.length < 2 || distance < MIN_RIDE_M) return null;
+  return {
+    pattern,
+    from,
+    to,
+    stopCount: j - i,
+    path,
+    distance,
+    rideSec: distance / MODE_SPEED[pattern.mode],
+    waitSec: MODE_WAIT[pattern.mode],
+  };
+}
+
+/**
+ * @param needShape 길 좌표가 있는 구간만 인정할지.
+ *   후보를 고르는 1차 계산에서는 false 다 — 그때는 아직 형상을 받기 전이고,
+ *   여기서 만든 직선 좌표는 순위를 매기는 데만 쓰고 화면에는 나가지 않는다.
+ *   화면에 올릴 2차 계산은 true 로 불러, 길을 모르는 구간을 통째로 뺀다.
+ */
 function rideOf(
   pattern: TransitPattern,
   stopsById: Map<string, TransitStop>,
   i: number,
-  j: number
+  j: number,
+  needShape: boolean
 ): RideSpec | null {
   const from = stopsById.get(pattern.stops[i]);
   const to = stopsById.get(pattern.stops[j]);
   if (!from || !to) return null;
 
   /*
-   * 노선 형상이 있으면 실제 도로를 따라간다. 없으면 정류장을 직선으로 잇는다.
-   * 형상을 쓰면 거리도 실제 주행거리가 되므로 소요 시간까지 함께 맞아떨어진다.
+   * 길 좌표(버스는 노선형상, 지하철은 선로)가 있어야 안내한다.
+   * 정류장만 직선으로 이으면 지도에서 건물을 뚫고 가고 거리도 실제보다 짧게 나온다.
+   * 길을 모르는 구간은 그럴듯하게 그리느니 아예 내놓지 않는다.
    */
   const si = pattern.stopIndex;
-  if (pattern.shape && si && si.length === pattern.stops.length && si[j] > si[i]) {
-    const path = pattern.shape.slice(si[i], si[j] + 1);
-    const distance = pathLength(path);
-    if (path.length < 2 || distance < MIN_RIDE_M) return null;
-    return {
-      pattern,
-      from,
-      to,
-      stopCount: j - i,
-      path,
-      distance,
-      rideSec: distance / MODE_SPEED[pattern.mode],
-      waitSec: MODE_WAIT[pattern.mode],
-    };
-  }
+  const shaped = !!pattern.shape && !!si && si.length === pattern.stops.length && si[i] >= 0 && si[j] > si[i];
+  if (!shaped) return needShape ? null : roughRide(pattern, stopsById, i, j, from, to);
 
-  const path: LngLat[] = [];
-  const surface: (number | null)[] = [];
-  let distance = 0;
-  let prev: LngLat | null = null;
-  for (let k = i; k <= j; k++) {
-    const s = stopsById.get(pattern.stops[k]);
-    if (!s) continue;
-    if (prev) {
-      distance += distMeters(prev, s.p);
-      // aboveGround[k-1] 은 stops[k-1] → stops[k] 구간이다
-      surface.push(pattern.aboveGround?.[k - 1] ?? null);
-    }
-    path.push(s.p);
-    prev = s.p;
-  }
+  const path = pattern.shape!.slice(si![i], si![j] + 1);
+  const distance = pathLength(path);
   if (path.length < 2 || distance < MIN_RIDE_M) return null;
+
+  /*
+   * 지상 비율은 정류장 사이 단위로 재 놓은 값이다.
+   * 형상은 그보다 잘게 나뉘므로, 구간이 차지하는 선분 수만큼 펴서 맞춘다.
+   */
+  const surface: (number | null)[] = [];
+  for (let k = i; k < j; k++) {
+    const ratio = pattern.aboveGround?.[k] ?? null;
+    for (let s = si![k]; s < si![k + 1]; s++) surface.push(ratio);
+  }
 
   return {
     pattern,
@@ -340,7 +368,7 @@ function rideOf(
     to,
     stopCount: j - i,
     path,
-    surface,
+    surface: surface.length === path.length - 1 ? surface : undefined,
     distance,
     rideSec: distance / MODE_SPEED[pattern.mode],
     waitSec: MODE_WAIT[pattern.mode],
@@ -357,7 +385,9 @@ export function planTransit(
   data: TransitData,
   origin: LngLat,
   destination: LngLat,
-  limit = 4
+  limit = 4,
+  /** 길 좌표가 있는 구간만 인정할지 — 화면에 올릴 계산은 true */
+  needShape = false
 ): TransitCandidate[] {
   const stopsById = new Map(data.stops.map((s) => [s.id, s]));
   const boardings = new Map<string, Boarding[]>();
@@ -419,7 +449,7 @@ export function planTransit(
     for (let j = index + 1; j < pattern.stops.length; j++) {
       const egress = egressOf.get(pattern.stops[j]);
       if (egress === undefined) continue;
-      const ride = rideOf(pattern, stopsById, index, j);
+      const ride = rideOf(pattern, stopsById, index, j, needShape);
       if (!ride) continue;
       // 걸어가는 편이 나은 조합, 목적지 쪽으로 가지 않는 조합은 버린다
       if (ride.distance < straight * 0.35) continue;
@@ -451,7 +481,7 @@ export function planTransit(
     for (let j = index + 1; j < pattern.stops.length; j++) {
       const stop = stopsById.get(pattern.stops[j]);
       if (!stop) continue;
-      const ride = rideOf(pattern, stopsById, index, j);
+      const ride = rideOf(pattern, stopsById, index, j, needShape);
       if (!ride) continue;
       // 첫 구간도 목적지 쪽으로 가야 한다 (되돌아가는 환승은 여기서 걸러진다)
       if (progressOf(ride) < MIN_PROGRESS_M) continue;
@@ -486,7 +516,7 @@ export function planTransit(
         for (let j = board.index + 1; j < board.pattern.stops.length; j++) {
           const egress = egressOf.get(board.pattern.stops[j]);
           if (egress === undefined) continue;
-          const second = rideOf(board.pattern, stopsById, board.index, j);
+          const second = rideOf(board.pattern, stopsById, board.index, j, needShape);
           if (!second) continue;
           if (!worthRiding(second)) continue;
           if (first.accessMeters + egress > walkBudget(straight)) continue;

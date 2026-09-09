@@ -12,7 +12,6 @@ import {
   MODE_FARE,
   MODE_LABEL,
   MODE_WAIT,
-  TRANSFER_RADIUS_M,
   type Arrival,
   type ArrivalIndex,
   type PatternLive,
@@ -90,7 +89,7 @@ export type Plan = {
  * 예전에는 직선으로 이어 버렸는데, 그러면 상도터널처럼 사람이 걸어서 지날 수 없는 곳을
  * "16분 걷기" 라고 우기는 안내가 나왔다. 없으면 그 여정을 통째로 버리는 편이 옳다.
  */
-export type WalkFn = (a: LngLat, b: LngLat, maxStraight?: number) => RouteResult | null;
+export type WalkFn = (a: LngLat, b: LngLat) => RouteResult | null;
 
 function walkStats(legs: Leg[]) {
   let meters = 0;
@@ -244,8 +243,8 @@ export function buildTransitPlan(
   let cursorName = opts.originName;
 
   /** 걷는 길이 없으면 false — 부르는 쪽이 이 여정을 버린다 */
-  const pushWalk = (to: LngLat, toName: string, maxStraight?: number) => {
-    const route = opts.walk(cursor, to, maxStraight);
+  const pushWalk = (to: LngLat, toName: string) => {
+    const route = opts.walk(cursor, to);
     if (!route) return false;
     if (route.distance >= 15) {
       legs.push({
@@ -263,14 +262,8 @@ export function buildTransitPlan(
     return true;
   };
 
-  for (const [i, ride] of (cand.rides as RideSpec[]).entries()) {
-    /*
-     * 환승 도보는 같은 역·정류장 언저리를 걷는 짧은 구간이다(길어야 TRANSFER_RADIUS_M).
-     * 그런데 환승 지점은 출발지·목적지에서 멀 수 있어 보행로 데이터가 없는 곳이 많다.
-     * (상도동 → 대치동 이면 노들역에서 갈아타는데, 거기는 출발지에서 1.7km 떨어져 있다)
-     * 그때 여정을 통째로 버리면 지하철 안내가 전부 사라진다. 짧은 구간이니 직선으로 어림한다.
-     */
-    if (!pushWalk(ride.from.p, ride.from.name, i > 0 ? TRANSFER_RADIUS_M : undefined)) return null;
+  for (const ride of cand.rides as RideSpec[]) {
+    if (!pushWalk(ride.from.p, ride.from.name)) return null;
     const arriveMs = clock;
     const wait = waitFor(ride, arriveMs, opts.arrivals ?? null);
     const boardMs = arriveMs + wait.sec * 1000;

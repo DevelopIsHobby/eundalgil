@@ -1,5 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { distToSegment, EARTH_M_PER_DEG_LAT, mPerDegLon, type LngLat } from "@/lib/geo";
+import {
+  bboxContains,
+  bboxOfPoints,
+  distToSegment,
+  EARTH_M_PER_DEG_LAT,
+  mPerDegLon,
+  padBBox,
+  toOverpassBBox,
+  type BBox,
+  type LngLat,
+} from "@/lib/geo";
+import { chainPaths, shapePartly } from "@/lib/shape";
 import {
   ACCESS_RADIUS_M,
   type TransitData,
@@ -40,15 +51,9 @@ const STOP_SELECTORS = [
   'node["railway"~"^(station|halt|tram_stop)$"]',
 ];
 
-/** 출발·도착을 모두 감싸는 범위 — 타고 가는 구간의 선로를 이 안에서만 받는다 */
+/** 출발·도착을 모두 감싸는 범위 — 타고 가는 구간의 선로·노선 길을 이 안에서만 받는다 */
 function corridorBox(a: LngLat, b: LngLat, meters: number) {
-  const dLat = meters / EARTH_M_PER_DEG_LAT;
-  const dLng = meters / mPerDegLon((a[1] + b[1]) / 2);
-  const s = Math.min(a[1], b[1]) - dLat;
-  const w = Math.min(a[0], b[0]) - dLng;
-  const n = Math.max(a[1], b[1]) + dLat;
-  const e = Math.max(a[0], b[0]) + dLng;
-  return `${s.toFixed(6)},${w.toFixed(6)},${n.toFixed(6)},${e.toFixed(6)}`;
+  return padBBox(bboxOfPoints([a, b]), meters);
 }
 
 /**
@@ -74,12 +79,28 @@ rel(bn.s)["type"="route"]["route"~"^(bus|subway|light_rail|tram|train|monorail|t
 .r out body qt;
 node(r.r)->.rn;
 .rn out body qt;
-way(r.r)(${corridorBox(a, b, radius)});
+way(r.r)(${toOverpassBBox(corridorBox(a, b, radius))});
 out geom;`;
 }
 
 /** 노선이 지나는 선로 한 토막 */
 type TrackWay = { tunnel: boolean; geometry: LngLat[] };
+
+/**
+ * 노선의 선로 조각을 이어 붙이고, 그 위에 역·정류장을 얹는다.
+ * 조각이 여럿으로 끊겨 오면(범위 밖이라 빠진 구간이 있으면) 긴 것부터 시도한다.
+ */
+function shapeOnTracks(tracks: TrackWay[], points: LngLat[], box: BBox) {
+  if (!tracks.length || points.length < 2) return null;
+  // 받아 온 범위 안에 있는 자리만 얹을 수 있다
+  const wanted = points.map((p) => (bboxContains(box, p) ? p : null));
+  const chains = chainPaths(tracks.map((w) => w.geometry)).sort((x, y) => y.length - x.length);
+  for (const chain of chains) {
+    const got = shapePartly(chain, wanted);
+    if (got) return got;
+  }
+  return null;
+}
 
 /** 이보다 멀면 그 자리의 선로가 응답에 없는 것으로 본다 */
 const TRACK_MATCH_M = 150;
@@ -179,6 +200,7 @@ export async function GET(req: NextRequest) {
   if (!a || !b) return new NextResponse("a, b 좌표가 필요합니다", { status: 400 });
 
   const radius = Math.min(MAX_RADIUS_M, Number(req.nextUrl.searchParams.get("r")) || 800);
+  const corridor = corridorBox(a, b, radius);
 
   const key = [...a, ...b].map((v) => v.toFixed(3)).join(",") + `@${radius}`;
   const hit = cache.get(key);
@@ -281,6 +303,17 @@ export async function GET(req: NextRequest) {
           .map((id, i) => hopSurfaceRatio(stops.get(ordered[i])!.p, stops.get(id)!.p, routeTracks))
       : undefined;
 
+    /*
+     * 역·정류장을 선로 위에 얹는다. 좌표만 직선으로 이으면 지도에서 건물을 뚫고 가고
+     * 거리도 실제보다 짧게 나온다.
+     * 선로는 출발~도착 범위에서만 받아 오므로, 그 밖의 역은 얹을 수 없다(-1).
+     */
+    const shaped = shapeOnTracks(
+      routeTracks,
+      ordered.map((id) => stops.get(id)!.p),
+      corridor
+    );
+
     patterns.push({
       id: `r${rel.id}`,
       ref: tags.ref ?? tags["ref:ko"] ?? "",
@@ -290,6 +323,8 @@ export async function GET(req: NextRequest) {
       headsign: tags.to,
       stops: ordered,
       aboveGround,
+      shape: shaped?.shape,
+      stopIndex: shaped?.stopIndex,
     });
   }
 

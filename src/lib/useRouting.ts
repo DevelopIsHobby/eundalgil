@@ -14,7 +14,6 @@ import {
   buildGraph,
   findRoutes,
   routeBetween,
-  straightRoute,
   type Graph,
   type RouteResult,
 } from "./router";
@@ -55,6 +54,12 @@ const ENDPOINT_PAD_M = Math.round(SEARCH_RADIUS_M * 1.3);
 const TRANSIT_CANDIDATES = 10;
 /** 그중 실제로 화면에 올릴 수 */
 const MAX_TRANSIT_PLANS = 4;
+/** 환승 지점 언저리에서 따로 받아 오는 보행로 반경(m) — 환승 도보를 덮을 만큼만 */
+const HUB_PAD_M = 500;
+/** 이만큼 안에 있는 환승 지점은 한 번만 받는다 */
+const HUB_MERGE_M = 400;
+/** 환승 지점 보행로를 받아 올 횟수 상한 — 한 곳당 Overpass 한 번이다 */
+const MAX_HUB_BUNDLES = 3;
 
 type Ctx = { bbox: BBox; graph: Graph };
 
@@ -86,24 +91,21 @@ function contextOf(
   return { bbox, graph };
 }
 
-/** 정류장 바로 앞처럼 짧은 틈만 직선으로 메운다 */
-const STRAIGHT_GAP_M = 120;
-
 /**
  * 두 점을 모두 덮는 그래프를 골라 걷는 길을 낸다.
  *
- * 길을 못 찾으면 **null 이다.** 예전에는 직선으로 이어 버렸는데, 상도동 ↔ 흑석동처럼
- * 차도 터널로만 연결된 구간에서 "터널을 가로질러 16분 걷기" 라는 없는 길이 만들어졌다.
- * 정류장 코앞의 짧은 틈만 직선으로 메운다.
+ * 길을 못 찾으면 **null 이다.** 직선으로 이어 버리면 없는 길이 생긴다 —
+ * 상도동 ↔ 흑석동처럼 차도 터널로만 연결된 구간에서 "터널을 가로질러 16분 걷기"
+ * 같은 안내가 나온다. 짧은 구간이라고 봐주지도 않는다. 길을 모르면 안 그린다.
  */
 function makeWalk(ctxs: Ctx[], weights: RouteWeights): WalkFn {
-  return (a: LngLat, b: LngLat, maxStraight = STRAIGHT_GAP_M): RouteResult | null => {
+  return (a: LngLat, b: LngLat): RouteResult | null => {
     for (const c of ctxs) {
       if (!bboxContains(c.bbox, a) || !bboxContains(c.bbox, b)) continue;
       const r = routeBetween(c.graph, a, b, weights);
       if (r) return r;
     }
-    return distMeters(a, b) <= maxStraight ? straightRoute(a, b) : null;
+    return null;
   };
 }
 
@@ -175,7 +177,7 @@ export function useRouting() {
         const [bundles, transit] = await Promise.all([bundlesPromise, transitPromise]);
         if (cancelled) return;
 
-        const ctxs = bundles
+        let ctxs = bundles
           .filter((b): b is OsmBundle => !!b)
           .map((b) => contextOf(b, timeMs, showTrees, night))
           .filter((c): c is Ctx => !!c);
@@ -185,8 +187,8 @@ export function useRouting() {
           return;
         }
 
-        const shadeWalk = makeWalk(ctxs, weights);
-        const fastWalk = makeWalk(ctxs, FASTEST_WEIGHTS);
+        let shadeWalk = makeWalk(ctxs, weights);
+        let fastWalk = makeWalk(ctxs, FASTEST_WEIGHTS);
         /*
          * "지금" 을 보고 있으면 계산에도 진짜 지금을 쓴다.
          * 시각 막대는 값을 스스로 갱신하지 않아 timeMs 가 몇 분씩 묵을 수 있는데,
@@ -243,26 +245,35 @@ export function useRouting() {
           if (!transit) {
             notices.push("대중교통 노선 정보를 불러오지 못했어요. 도보 경로만 보여드려요.");
           } else {
-            let candidates = planTransit(transit, origin.p, destination.p, TRANSIT_CANDIDATES);
-
             /*
-             * 후보가 정해졌으니 그 노선의 형상(도로를 따라가는 좌표열)을 받아 다시 짠다.
-             * 근처 노선을 통째로 받으면 응답이 너무 커서 미리 받아 둘 수가 없다.
-             * 형상이 붙으면 지도에 도로를 따라 그려지고, 거리·시간도 실제 주행 기준이 된다.
+             * 1차: 어느 노선을 볼지만 고른다. 아직 길 좌표가 없어 정류장을 곧장 이어
+             * 어림하지만, 그 좌표는 화면에 나가지 않는다 — 순위를 매기는 데만 쓴다.
              */
-            if (candidates.length) {
+            const rough = planTransit(transit, origin.p, destination.p, TRANSIT_CANDIDATES);
+
+            // 그 노선들의 형상을 받는다. 통째로 미리 받기엔 응답이 너무 커진다
+            if (rough.length) {
               const used = new Map<string, TransitPattern>();
-              for (const c of candidates) for (const r of c.rides) used.set(r.pattern.id, r.pattern);
+              for (const c of rough) for (const r of c.rides) used.set(r.pattern.id, r.pattern);
               try {
-                const shapes = await fetchShapes(transit, [...used.values()], ctl.signal);
-                if (applyShapes(transit, shapes)) {
-                  candidates = planTransit(transit, origin.p, destination.p, TRANSIT_CANDIDATES);
-                }
+                applyShapes(transit, await fetchShapes(transit, [...used.values()], ctl.signal));
               } catch {
-                /* 형상을 못 받아도 정류장을 직선으로 이어 안내한다 */
+                /* 못 받으면 그 노선은 아래 2차에서 빠진다 */
               }
               if (cancelled) return;
             }
+
+            /*
+             * 2차: 실제로 그릴 것을 짠다. 길 좌표가 없는 구간은 여기서 빠진다.
+             * 형상 받기가 실패해도 이 계산은 반드시 거치므로, 어림 좌표가 화면에 새어 나가지 않는다.
+             */
+            const candidates = planTransit(
+              transit,
+              origin.p,
+              destination.p,
+              TRANSIT_CANDIDATES,
+              true
+            );
 
             if (!candidates.length) {
               // 버스가 한 노선도 없으면 "노선이 없다" 가 아니라 "데이터가 없다" 가 맞는 설명이다
@@ -292,9 +303,53 @@ export function useRouting() {
               if (cancelled) return;
             }
 
+            /*
+             * 환승 지점 언저리의 보행로를 더 받아 온다.
+             *
+             * 환승은 출발·목적지에서 한참 떨어진 곳에서 일어난다 — 상도동 → 대치동이면
+             * 노들역에서 갈아타는데 거기는 출발지에서 1.7km 다. 그 언저리 길이 없으면
+             * 200m 짜리 환승 도보를 못 찾아 지하철 안내가 통째로 사라진다.
+             * 직선으로 이어 버릴 수는 없으니(없는 길이 생긴다) 필요한 곳만 더 받는다.
+             */
+            const hubs: LngLat[] = [];
+            for (const c of candidates) {
+              for (let k = 1; k < c.rides.length; k++) {
+                for (const p of [c.rides[k - 1].to.p, c.rides[k].from.p]) {
+                  if (ctxs.some((x) => bboxContains(x.bbox, p))) continue;
+                  if (hubs.some((h) => distMeters(h, p) < HUB_MERGE_M)) continue;
+                  hubs.push(p);
+                }
+              }
+            }
+            if (hubs.length) {
+              const extra = await Promise.all(
+                hubs.slice(0, MAX_HUB_BUNDLES).map((p) => {
+                  const box = padBBox(bboxOfPoints([p]), HUB_PAD_M);
+                  return fetchOsmBundle(
+                    [box.minLng, box.minLat, box.maxLng, box.maxLat],
+                    ctl.signal
+                  ).catch(() => null);
+                })
+              );
+              if (cancelled) return;
+              const added = extra
+                .filter((b): b is OsmBundle => !!b)
+                .map((b) => contextOf(b, timeMs, showTrees, night))
+                .filter((c): c is Ctx => !!c);
+              if (added.length) {
+                ctxs = [...ctxs, ...added];
+                shadeWalk = makeWalk(ctxs, weights);
+                fastWalk = makeWalk(ctxs, FASTEST_WEIGHTS);
+              }
+            }
+
             // 지도(__map)·상태(__app)와 마찬가지로, 왜 이 노선이 뽑혔는지 콘솔에서 들여다볼 수 있게 한다
             if (process.env.NODE_ENV === "development") {
-              (window as unknown as { __transit?: unknown }).__transit = { data: transit, candidates };
+              (window as unknown as { __transit?: unknown }).__transit = {
+                data: transit,
+                rough,
+                candidates,
+              };
             }
 
             let dropped = 0;

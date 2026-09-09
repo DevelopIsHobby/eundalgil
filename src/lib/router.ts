@@ -513,27 +513,9 @@ export type RouteOption = RouteResult & {
   label: string;
 };
 
-/** 직선으로 이은 대체 경로 — 보행로 데이터가 닿지 않는 짧은 접근 구간에 쓴다 */
-export function straightRoute(start: LngLat, end: LngLat): RouteResult {
-  // 실제로는 골목을 돌아가므로 직선거리에 약간의 여유를 둔다
-  const d = distMeters(start, end) * 1.25;
-  return {
-    path: [start, end],
-    distance: d,
-    duration: d / WALK_SPEED_MPS,
-    shadeRatio: 0,
-    safetyRatio: 0,
-    stepsMeters: 0,
-    crossings: 0,
-    ascent: 0,
-    segments: [{ path: [start, end], shade: 0 }],
-    streets: [],
-  };
-}
-
 /**
  * 두 지점 사이의 경로 하나. 대중교통 여정의 접근·환승·마무리 도보 구간에 쓴다.
- * 그래프 밖이면 null 을 돌려주고, 부르는 쪽이 `straightRoute` 로 어림잡는다.
+ * 그래프 밖이면 null 이다. 직선으로 어림잡지 않는다 — 없는 길이 생긴다.
  */
 export function routeBetween(
   graph: Graph,
