@@ -9,6 +9,7 @@ import { DEFAULT_CENTER, DEFAULT_ZOOM } from "./config";
 import type { BasemapId } from "./basemap";
 import type { Shelter } from "./shelters";
 import type { SeatAdvice } from "./seat";
+import type { TransitStop } from "./transit";
 import { loadSaved, toggleSaved, type SavedTrip } from "./saved";
 
 export type Place = { name: string; address?: string; p: LngLat };
@@ -65,6 +66,8 @@ type State = {
   weather: Weather;
   /** 지금 보고 있는 여정 주변의 무더위쉼터 */
   shelters: Shelter[];
+  /** 이 구간에서 찾은 정류장 — 지도에 점으로 뿌린다 */
+  transitStops: TransitStop[];
   /** 같은 길을 이따 걸으면 더 시원할 때, 그 시각 */
   departure: { atMs: number; shade: number; nowShade: number } | null;
   /** 저장한 길 (출발·도착만 남긴다) */
@@ -106,6 +109,7 @@ type Actions = {
 
   setWeather: (w: Weather) => void;
   setShelters: (s: Shelter[]) => void;
+  setTransitStops: (s: TransitStop[]) => void;
   setDeparture: (d: { atMs: number; shade: number; nowShade: number } | null) => void;
   hydrateSaved: () => void;
   setSeatOverride: (key: string, advice: SeatAdvice) => void;
@@ -149,6 +153,7 @@ export const useApp = create<State & Actions>((set, get) => ({
 
   weather: null,
   shelters: [],
+  transitStops: [],
   departure: null,
   saved: [],
   seatOverrides: {},
@@ -192,6 +197,7 @@ export const useApp = create<State & Actions>((set, get) => ({
 
   setWeather: (weather) => set({ weather }),
   setShelters: (shelters) => set({ shelters }),
+  setTransitStops: (transitStops) => set({ transitStops }),
   setDeparture: (departure) => set({ departure }),
   hydrateSaved: () => set({ saved: loadSaved() }),
   setSeatOverride: (key, advice) =>
@@ -213,6 +219,7 @@ export const useApp = create<State & Actions>((set, get) => ({
       planIndex: 0,
       planError: null,
       notices: [],
+      transitStops: [],
     }),
 }));
 

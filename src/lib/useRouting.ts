@@ -241,6 +241,8 @@ export function useRouting() {
        */
       const prepPromise = transitPromise.then(async (transit) => {
         if (!transit) return null;
+        // 지도에 주변 정류장을 뿌리는 데 쓴다 (노선 계산과는 별개다)
+        if (!cancelled) useApp.getState().setTransitStops(transit.stops);
         const rough = planTransit(transit, origin.p, destination.p, TRANSIT_CANDIDATES);
         if (!rough.length) return { rough, shapes: [], extra: [], live: null };
 

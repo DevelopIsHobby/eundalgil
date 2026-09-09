@@ -21,6 +21,31 @@ export function getMap() {
 }
 
 const ROUTE_SRC = "eundalgil-routes";
+const STOP_SRC = "eundalgil-stops";
+
+/**
+ * 주변 정류장. 마커로 찍으면 수백 개에서 버벅이므로 GL 원으로 그린다.
+ * 줌 15부터 슬며시 나타나고, 경로선을 가리지 않게 작고 흐리게 둔다.
+ */
+const STOP_LAYERS: LayerSpecification[] = [
+  {
+    id: "stops-dot",
+    type: "circle",
+    source: STOP_SRC,
+    minzoom: 14.5,
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 14.5, 2, 17, 4.5, 19, 6] as never,
+      "circle-color": ["match", ["get", "mode"], "subway", "#5B4CE0", "#2E6FF2"] as never,
+      "circle-opacity": ["interpolate", ["linear"], ["zoom"], 14.5, 0.25, 16, 0.55] as never,
+      "circle-stroke-width": 1,
+      "circle-stroke-color": "#FFFFFF",
+      "circle-stroke-opacity": ["interpolate", ["linear"], ["zoom"], 14.5, 0.2, 16, 0.7] as never,
+    },
+  },
+];
+
+type StopFC = GeoJSON.FeatureCollection<GeoJSON.Point, { mode: string; name: string }>;
+const EMPTY_STOPS: StopFC = { type: "FeatureCollection", features: [] };
 
 const WALK_SHADE = "#00A86B";
 const WALK_SUN = "#F5A524";
@@ -141,6 +166,17 @@ function buildPlanFC(plan: Plan | null): RouteFC {
  * 스타일이 준비됐는지는 호출하는 쪽에서 style.load 로 판단한다.
  * (map.isStyleLoaded() 는 타일 소스가 하나라도 로딩 중이면 false 라 여기 쓰기엔 너무 엄격하다)
  */
+function applyStops(map: MapLibreMap, fc: StopFC) {
+  const src = map.getSource(STOP_SRC) as GeoJSONSource | undefined;
+  if (src) {
+    src.setData(fc);
+    return;
+  }
+  map.addSource(STOP_SRC, { type: "geojson", data: fc });
+  // 경로보다 먼저 그려야 경로선이 위로 온다
+  for (const layer of STOP_LAYERS) map.addLayer(layer);
+}
+
 function applyRoutes(map: MapLibreMap, fc: RouteFC) {
   const src = map.getSource(ROUTE_SRC) as GeoJSONSource | undefined;
   if (src) {
@@ -243,6 +279,7 @@ export default function MapView({
   const labelMarkersRef = useRef<Marker[]>([]);
   const shelterMarkersRef = useRef<Marker[]>([]);
   const routeFCRef = useRef<RouteFC>(EMPTY_FC);
+  const stopFCRef = useRef<StopFC>(EMPTY_STOPS);
   /** 스타일이 올라와 소스·레이어를 붙여도 되는 상태인지 */
   const styleReady = useRef(false);
   const lastFetchBBox = useRef<[number, number, number, number] | null>(null);
@@ -430,6 +467,7 @@ export default function MapView({
 
     const onStyleLoad = () => {
       styleReady.current = true;
+      applyStops(map, stopFCRef.current);
       applyRoutes(map, routeFCRef.current);
       drawRef.current();
     };
@@ -577,6 +615,22 @@ export default function MapView({
       markersRef.current = [];
     };
   }, [origin, destination, screen]);
+
+  /* ---------------- 주변 정류장 ---------------- */
+  const transitStops = useApp((s) => s.transitStops);
+  useEffect(() => {
+    const fc: StopFC = {
+      type: "FeatureCollection",
+      features: transitStops.map((s) => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: s.p as number[] },
+        properties: { mode: s.mode, name: s.name },
+      })),
+    };
+    stopFCRef.current = fc;
+    const map = mapRef;
+    if (map && styleReady.current) applyStops(map, fc);
+  }, [transitStops]);
 
   /* ---------------- 무더위쉼터 ---------------- */
   const shelters = useApp((s) => s.shelters);

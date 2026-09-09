@@ -269,3 +269,17 @@ export const IconNavigate = (p: P) => (
     <path d="m4 11 16-7-7 16-2-7-7-2Z" />
   </svg>
 );
+
+export const IconSound = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M11 5 6 9H3v6h3l5 4V5Z" />
+    <path d="M15.5 8.5a5 5 0 0 1 0 7M18 6a8.5 8.5 0 0 1 0 12" />
+  </svg>
+);
+
+export const IconSoundOff = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M11 5 6 9H3v6h3l5 4V5Z" />
+    <path d="m16 9 5 6M21 9l-5 6" />
+  </svg>
+);

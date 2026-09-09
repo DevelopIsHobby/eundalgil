@@ -14,7 +14,63 @@ import {
   type GuideStep,
 } from "@/lib/guide";
 import type { LngLat } from "@/lib/geo";
-import { IconBus, IconClose, IconFlag, IconWalk } from "./icons";
+import { IconBus, IconClose, IconFlag, IconSound, IconSoundOff, IconWalk } from "./icons";
+
+/** 안내를 소리로 읽어 줄 거리 — 이 안에 들어오면 한 번 말한다 */
+const SPEAK_WITHIN_M = 60;
+
+/**
+ * 걷는 동안 화면이 꺼지지 않게 붙잡는다.
+ * 주머니에 넣고 걸으면 안내가 멈추는 게 아니라 화면만 꺼지지만, 다시 켤 때마다
+ * 위치를 새로 잡느라 안내가 끊긴다. 브라우저가 지원할 때만 동작한다.
+ */
+function useWakeLock(active: boolean) {
+  useEffect(() => {
+    if (!active) return;
+    type Sentinel = { release: () => Promise<void> };
+    const nav = navigator as Navigator & { wakeLock?: { request: (t: "screen") => Promise<Sentinel> } };
+    if (!nav.wakeLock) return;
+
+    let lock: Sentinel | null = null;
+    let stopped = false;
+    const acquire = async () => {
+      try {
+        lock = (await nav.wakeLock!.request("screen")) ?? null;
+      } catch {
+        /* 배터리 절약 모드 등에서는 거절될 수 있다 — 그냥 없이 간다 */
+      }
+    };
+    // 화면을 다시 켜면 잠금이 풀려 있으므로 다시 잡는다
+    const onVisible = () => {
+      if (!stopped && document.visibilityState === "visible") void acquire();
+    };
+    void acquire();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      stopped = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      void lock?.release().catch(() => {});
+    };
+  }, [active]);
+}
+
+/** 안내를 소리로 읽어 준다. 같은 안내를 두 번 말하지 않는다 */
+function useSpeech(enabled: boolean) {
+  const spoken = useRef<string | null>(null);
+  return (key: string, text: string) => {
+    if (!enabled || spoken.current === key) return;
+    spoken.current = key;
+    try {
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = "ko-KR";
+      u.rate = 1.05;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+    } catch {
+      /* 지원하지 않는 브라우저면 조용히 넘어간다 */
+    }
+  };
+}
 
 /** 이보다 멀어지면 경로를 벗어난 것으로 본다 */
 const OFF_ROUTE_M = 45;
@@ -48,12 +104,15 @@ export default function GuideOverlay() {
   const setOrigin = useApp((s) => s.setOrigin);
   const showToast = useApp((s) => s.showToast);
 
+  const [voice, setVoice] = useState(true);
   const [here, setHere] = useState<LngLat | null>(null);
   const [accuracy, setAccuracy] = useState<number | null>(null);
   const [offRoute, setOffRoute] = useState(false);
   const offHits = useRef(0);
 
   const guide = useMemo(() => (plan ? buildGuide(plan) : null), [plan]);
+  useWakeLock(true);
+  const speak = useSpeech(voice);
 
   /* 위치 추적 */
   useEffect(() => {
@@ -92,6 +151,7 @@ export default function GuideOverlay() {
     () => () => {
       dotRef.current?.remove();
       dotRef.current = null;
+      window.speechSynthesis?.cancel();
     },
     []
   );
@@ -113,14 +173,26 @@ export default function GuideOverlay() {
     }
   }, [on]);
 
-  if (!plan || !guide) return null;
-
-  const total = guide.path.length ? guide.steps[guide.steps.length - 1]?.at ?? 0 : 0;
+  const total = guide ? guide.steps[guide.steps.length - 1]?.at ?? 0 : 0;
   const at = on?.at ?? 0;
-  const upcoming = nextStep(guide.steps, at);
+  const upcoming = guide ? nextStep(guide.steps, at) : null;
   const remainM = Math.max(0, total - at);
   // 남은 시간은 전체 소요를 남은 거리 비율로 나눠 어림한다
-  const remainSec = total > 0 ? (plan.seconds * remainM) / total : 0;
+  const remainSec = plan && total > 0 ? (plan.seconds * remainM) / total : 0;
+
+  /* 회전이 가까워지면 한 번 읽어 준다 (렌더 중에 소리를 내면 안 되므로 효과에서) */
+  const speakKey =
+    upcoming && upcoming.remain <= SPEAK_WITHIN_M
+      ? `${Math.round(upcoming.step.at)}:${upcoming.step.text}`
+      : null;
+  const speakText = upcoming?.step.ride ? upcoming.step.text : `잠시 후 ${upcoming?.step.text ?? ""}`;
+  useEffect(() => {
+    if (speakKey) speak(speakKey, speakText);
+    // speak 은 이미 같은 안내를 두 번 말하지 않게 막고 있다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speakKey]);
+
+  if (!plan || !guide) return null;
 
   const recompute = () => {
     if (!here) return;
@@ -146,6 +218,17 @@ export default function GuideOverlay() {
               {upcoming?.step.ride && ` · ${upcoming.step.ride.stops}개 정류장 뒤 ${upcoming.step.ride.to}`}
             </p>
           </div>
+          <button
+            onClick={() => {
+              setVoice((v) => !v);
+              if (voice) window.speechSynthesis?.cancel();
+            }}
+            aria-label={voice ? "음성 안내 끄기" : "음성 안내 켜기"}
+            aria-pressed={voice}
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-white/10 text-white/80"
+          >
+            {voice ? <IconSound /> : <IconSoundOff />}
+          </button>
           <button
             onClick={() => setGuiding(false)}
             aria-label="안내 끝내기"
