@@ -19,7 +19,7 @@ import type { OsmBundle } from "./osm";
  * 저장 형식 표시. **Overpass 질의나 걸러내는 규칙을 바꾸면 반드시 올린다.**
  * 안 올리면 옛 규칙으로 걸러진 데이터가 며칠씩 남아 "왜 아직도 터널로 가지?" 가 된다.
  */
-const SCHEMA = "v2"; // v2: 건물을 브이월드 건물통합정보에서 받는다
+const SCHEMA = "v3"; // v2: 건물을 브이월드에서 / v3: 가로수 열(tree_row) 추가
 const DIR = join(tmpdir(), "eundalgil-osm", SCHEMA);
 
 /** 지도 데이터는 자주 바뀌지 않는다. 사흘이면 충분히 신선하다 */

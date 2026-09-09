@@ -5,6 +5,7 @@ import {
   bboxIntersects,
   bboxOfPoints,
   pointInRing,
+  resample,
   type BBox,
   type LngLat,
 } from "@/lib/geo";
@@ -61,6 +62,7 @@ function buildQuery(b: BBox, withBuildings: boolean) {
 (
   ${withBuildings ? `way["building"](${bb});` : ""}
   node["natural"="tree"](${bb});
+  way["natural"="tree_row"](${bb});
   way["highway"~"${WALK_HIGHWAY}"]["area"!~"yes"](${bb});
   way["natural"~"^(wood|scrub)$"](${bb});
   way["landuse"~"^(forest)$"](${bb});
@@ -155,7 +157,18 @@ function bundleOf(elements: OverpassElement[], box: BBox, woods: Wood[]): OsmBun
       const path: LngLat[] = el.geometry.map((g) => [g.lon, g.lat]);
       // 걸치기만 해도 넣는다 — 경계에서 잘린 건물·길은 그늘도 경로도 어긋나게 만든다
       if (!bboxIntersects(box, bboxOfPoints(path))) continue;
-      if (tags.building) {
+      if (tags.natural === "tree_row") {
+        /*
+         * 가로수를 한 그루씩 찍어 둔 곳은 드물고, 줄로 그어 둔 곳(tree_row)이 더 흔하다.
+         * 선을 8m 간격으로 끊어 그 자리에 나무가 서 있는 것으로 친다 —
+         * 가로수 간격이 대개 6~10m 다.
+         */
+        const h = parseFloat(tags.height ?? "") || 8;
+        const crown = parseFloat(tags["diameter_crown"] ?? "") / 2 || 3;
+        resample(path, 8).forEach((p, i) => {
+          trees.push({ id: `r${el.id}_${i}`, p, height: h, crown: Math.max(1.5, crown) });
+        });
+      } else if (tags.building) {
         if (path.length >= 4) {
           buildings.push({
             id: `w${el.id}`,

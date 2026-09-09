@@ -7,7 +7,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { EARTH_M_PER_DEG_LAT, mPerDegLon, type BBox } from "@/lib/geo";
+import type { BBox } from "@/lib/geo";
 import { fetchVWorldBuildings, hasVWorldBuildings } from "@/lib/vworldBuildings";
 
 export const runtime = "nodejs";
@@ -49,16 +49,4 @@ export async function GET(req: NextRequest) {
 
   // 지도에 그리는 게 아니라 그늘 계산에만 쓰므로 좌표는 그대로 둔다
   return NextResponse.json({ buildings, bbox: [box.minLng, box.minLat, box.maxLng, box.maxLat] });
-}
-
-/** 미터 단위로 범위를 넓힌다 (부르는 쪽 편의를 위해 여기 둔다) */
-export function padBox(b: BBox, meters: number): BBox {
-  const dLat = meters / EARTH_M_PER_DEG_LAT;
-  const dLng = meters / mPerDegLon((b.minLat + b.maxLat) / 2);
-  return {
-    minLng: b.minLng - dLng,
-    minLat: b.minLat - dLat,
-    maxLng: b.maxLng + dLng,
-    maxLat: b.maxLat + dLat,
-  };
 }
