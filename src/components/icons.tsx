@@ -255,3 +255,11 @@ export const IconSnow = (p: P) => (
     <path d="M9 19h.01M13 20h.01M17 19h.01" />
   </svg>
 );
+
+export const IconShelter = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M3 11 12 4l9 7" />
+    <path d="M6 10.5V20h12v-9.5" />
+    <path d="M10 20v-4h4v4" />
+  </svg>
+);

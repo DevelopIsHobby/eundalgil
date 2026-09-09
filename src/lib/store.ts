@@ -7,6 +7,7 @@ import type { PlanPair, PlanStyle } from "./plan";
 import { DEFAULT_PREFS, loadPrefs, savePrefs, type Prefs } from "./prefs";
 import { DEFAULT_CENTER, DEFAULT_ZOOM } from "./config";
 import type { BasemapId } from "./basemap";
+import type { Shelter } from "./shelters";
 
 export type Place = { name: string; address?: string; p: LngLat };
 
@@ -52,6 +53,8 @@ type State = {
   routing: boolean;
 
   weather: Weather;
+  /** 지금 보고 있는 여정 주변의 무더위쉼터 */
+  shelters: Shelter[];
   toast: string | null;
 };
 
@@ -81,6 +84,7 @@ type Actions = {
   setRouting: (v: boolean) => void;
 
   setWeather: (w: Weather) => void;
+  setShelters: (s: Shelter[]) => void;
   showToast: (msg: string | null) => void;
   reset: () => void;
 };
@@ -118,6 +122,7 @@ export const useApp = create<State & Actions>((set, get) => ({
   routing: false,
 
   weather: null,
+  shelters: [],
   toast: null,
 
   setScreen: (screen) => set({ screen }),
@@ -156,6 +161,7 @@ export const useApp = create<State & Actions>((set, get) => ({
   setRouting: (routing) => set({ routing }),
 
   setWeather: (weather) => set({ weather }),
+  setShelters: (shelters) => set({ shelters }),
   showToast: (toast) => set({ toast }),
   reset: () =>
     set({

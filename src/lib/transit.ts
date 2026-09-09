@@ -105,17 +105,26 @@ export const MODE_LABEL: Record<TransitMode, string> = {
  * 통째로 후보에서 빠지고 버스만 남는다. (삼성중앙역이 993m 라 잘렸었다)
  */
 export const ACCESS_RADIUS_M: Record<TransitMode, number> = {
-  bus: 800,
+  bus: 1200,
   subway: 1200,
-  tram: 800,
+  tram: 1000,
   train: 1200,
 };
 
 /** 정류장을 찾아 달라고 서버에 넘길 반경 — 가장 넓은 수단에 맞춘다 */
 export const SEARCH_RADIUS_M = Math.max(...Object.values(ACCESS_RADIUS_M));
 
-/** 한쪽 끝에서 고를 정류장 수 — 수단마다 따로 센다 */
-const MAX_ACCESS_PER_MODE = 12;
+/**
+ * 한쪽 끝에서 고를 정류장 수 — 수단마다 따로 센다.
+ * 가까운 순으로만 자르면 12개가 전부 반경 300m 안에서 채워져, 조금 걸어 나가면 있는
+ * 큰 정류장(상도역 앞 같은)이 통째로 빠진다. 그래서 거리 구간별로 몫을 나눠 뽑는다.
+ * 실제 사람들도 좋은 노선을 타려고 10분쯤은 걸어 나간다.
+ */
+const ACCESS_BANDS: [limit: number, quota: number][] = [
+  [400, 6],
+  [800, 3],
+  [Infinity, 3],
+];
 /** 환승 도보로 인정하는 최대 직선거리(m) */
 export const TRANSFER_RADIUS_M = 260;
 /** 도보 추정용 — 직선거리에 곱하는 우회 계수 */
@@ -139,8 +148,16 @@ const MIN_RIDE_M = 450;
  */
 const MIN_PROGRESS_RATIO = 0.35;
 const MIN_PROGRESS_M = 250;
-/** 접근·하차 도보를 합쳐 이보다 멀면, 타는 것보다 걷는 게 낫다 */
-const walkBudget = (straight: number) => Math.max(700, straight * 1.15);
+/**
+ * 접근·하차 도보 합의 상한 — 여기 걸리면 후보로 만들지도 않는다.
+ *
+ * 예전에는 `직선거리 × 1.15` 로 빡빡하게 잡았다. 엉터리 경로를 막으려던 것인데,
+ * 지금은 "타고 가서 가까워져야 한다"는 규칙과 "실제로 걸어 본 뒤 걷는 것보다 느리면
+ * 버린다"는 규칙이 그 일을 대신한다. 빡빡한 상한은 오히려 **역까지 걸어 나가서 좋은
+ * 노선을 타는** 멀쩡한 안(상도동에서 1.2km 걸어 상도역, 거기서 마을버스)을 잘라 냈다.
+ * 그래서 계산량만 막을 만큼 느슨하게 둔다.
+ */
+const walkBudget = (straight: number) => Math.max(1600, straight * 1.6);
 
 export async function fetchTransit(
   origin: LngLat,
@@ -417,7 +434,16 @@ export function planTransit(
     const out: { s: TransitStop; d: number }[] = [];
     for (const arr of byMode.values()) {
       arr.sort((x, y) => x.d - y.d);
-      out.push(...arr.slice(0, MAX_ACCESS_PER_MODE));
+      let from = 0;
+      for (const [limit, quota] of ACCESS_BANDS) {
+        let taken = 0;
+        for (const item of arr) {
+          if (item.d <= from || item.d > limit) continue;
+          out.push(item);
+          if (++taken >= quota) break;
+        }
+        from = limit;
+      }
     }
     return out.sort((a, b) => a.d - b.d);
   };

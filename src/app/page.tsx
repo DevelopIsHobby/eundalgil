@@ -16,6 +16,7 @@ import WeatherCard, { useWeather } from "@/components/WeatherCard";
 import Toast from "@/components/Toast";
 import { useActivePlan, useApp, type Place } from "@/lib/store";
 import { useRouting } from "@/lib/useRouting";
+import { useShelters } from "@/lib/shelters";
 import { MIN_DATA_ZOOM } from "@/lib/config";
 import { IconWalk } from "@/components/icons";
 
@@ -44,6 +45,7 @@ export default function Page() {
 
   useRouting();
   useWeather();
+  useShelters();
 
   /* 저장해 둔 취향을 불러온다 (서버 렌더와 어긋나지 않게 마운트 뒤에) */
   useEffect(() => {

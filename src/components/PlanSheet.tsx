@@ -8,7 +8,8 @@ import { SIDE_LABEL } from "@/lib/seat";
 import SeatDiagram from "./SeatDiagram";
 // 지도와 시트가 같은 색을 써야 한 여정으로 읽힌다
 import { rideColorOf as rideColor } from "./MapView";
-import { IconBus, IconLeaf, IconSubway, IconSun, IconWalk } from "./icons";
+import { sheltersNearPath, type Shelter } from "@/lib/shelters";
+import { IconBus, IconLeaf, IconShelter, IconSubway, IconSun, IconWalk } from "./icons";
 
 /** 수단 막대 — 도보/승차 시간을 비율대로 늘어놓는다 */
 function ModeBar({ plan }: { plan: Plan }) {
@@ -59,8 +60,27 @@ function legSeconds(leg: Leg) {
 }
 
 
+/** 걷다가 들어가 쉴 수 있는 곳 — 햇빛 구간이 길 때 특히 쓸모 있다 */
+function ShelterNote({ shelters }: { shelters: Shelter[] }) {
+  const open = shelters.filter((s) => s.openNow);
+  if (!open.length) return null;
+  const first = open[0];
+  return (
+    <p className="mt-1 flex items-start gap-1 text-[12px] leading-relaxed text-ink-500">
+      <IconShelter className="mt-[1px] h-3.5 w-3.5 shrink-0 text-[#0B7BC1]" />
+      <span>
+        지나는 길에 무더위쉼터 {open.length}곳 · <b className="font-semibold">{first.name}</b>
+        <span className="text-ink-400"> {first.hours}</span>
+      </span>
+    </p>
+  );
+}
+
 function WalkLegRow({ leg }: { leg: WalkLeg }) {
   const pct = Math.round(leg.route.shadeRatio * 100);
+  const shelters = useApp((s) => s.shelters);
+  // 그늘이 넉넉하면 굳이 쉼터까지 알려 줄 필요는 없다
+  const near = pct >= 70 ? [] : sheltersNearPath(shelters, leg.route.path);
   // 같은 이름의 정류장 사이를 걷는 건 환승이다 ("중대후문입구 → 중대후문입구" 로 보이면 이상하다)
   const transfer = leg.from === leg.to;
   return (
@@ -96,6 +116,7 @@ function WalkLegRow({ leg }: { leg: WalkLeg }) {
             그늘 {pct}%
           </p>
         )}
+        <ShelterNote shelters={near} />
       </div>
     </li>
   );

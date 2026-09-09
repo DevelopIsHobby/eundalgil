@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { Map as MapLibreMap, Marker, type GeoJSONSource, type LayerSpecification } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useActivePlan, useApp } from "@/lib/store";
+import { sheltersOnPlanWalks } from "@/lib/shelters";
 import { useLatest } from "@/lib/useDebounced";
 import { getSunState } from "@/lib/sun";
 import { ShadeIndex, buildShadows, type ShadowPoly } from "@/lib/shadow";
@@ -180,6 +181,19 @@ function pointAlong(path: LngLat[], frac: number): LngLat | null {
   return path[path.length - 1];
 }
 
+/** 무더위쉼터 표시 — 경로 옆에 조용히 찍어 두고, 눌러야 이름이 뜬다 */
+function makeShelterElement(name: string, hours: string) {
+  const el = document.createElement("div");
+  el.style.cssText = "cursor:pointer";
+  el.title = `${name} ${hours}`;
+  el.innerHTML = `
+    <div style="width:16px;height:16px;border-radius:50%;background:#0B7BC1;border:2px solid #fff;
+                box-shadow:0 1px 4px rgba(0,0,0,.35);display:grid;place-items:center">
+      <div style="width:6px;height:6px;border-radius:1px;background:#fff"></div>
+    </div>`;
+  return el;
+}
+
 /** 지도 위 말풍선 — 승·하차 정류장과 노선 번호를 알려 준다 */
 function makeLabelElement(text: string, color: string, filled: boolean) {
   const el = document.createElement("div");
@@ -227,6 +241,7 @@ export default function MapView({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const markersRef = useRef<Marker[]>([]);
   const labelMarkersRef = useRef<Marker[]>([]);
+  const shelterMarkersRef = useRef<Marker[]>([]);
   const routeFCRef = useRef<RouteFC>(EMPTY_FC);
   /** 스타일이 올라와 소스·레이어를 붙여도 되는 상태인지 */
   const styleReady = useRef(false);
@@ -479,6 +494,8 @@ export default function MapView({
       markersRef.current = [];
       labelMarkersRef.current.forEach((m) => m.remove());
       labelMarkersRef.current = [];
+      shelterMarkersRef.current.forEach((m) => m.remove());
+      shelterMarkersRef.current = [];
       styleReady.current = false;
       map.remove();
       mapRef = null;
@@ -560,6 +577,33 @@ export default function MapView({
       markersRef.current = [];
     };
   }, [origin, destination, screen]);
+
+  /* ---------------- 무더위쉼터 ---------------- */
+  const shelters = useApp((s) => s.shelters);
+  useEffect(() => {
+    const map = mapRef;
+    if (!map) return;
+
+    shelterMarkersRef.current.forEach((m) => m.remove());
+    shelterMarkersRef.current = [];
+
+    if (plan) {
+      // 걷는 구간 옆에 있고, 지금 문을 연 곳만 찍는다
+      const walks = plan.legs.filter((l) => l.type === "walk").map((l) => l.route.path);
+      for (const s of sheltersOnPlanWalks(shelters, walks)) {
+        if (!s.openNow) continue;
+        const marker = new Marker({ element: makeShelterElement(s.name, s.hours), anchor: "center" })
+          .setLngLat(s.p)
+          .addTo(map);
+        shelterMarkersRef.current.push(marker);
+      }
+    }
+
+    return () => {
+      shelterMarkersRef.current.forEach((m) => m.remove());
+      shelterMarkersRef.current = [];
+    };
+  }, [plan, shelters]);
 
   /* ---------------- 승·하차 말풍선 ---------------- */
   useEffect(() => {
