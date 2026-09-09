@@ -74,20 +74,36 @@ const CROSSING_WAIT_S = 8;
 const ASCENT_SEC_PER_M = 3600 / 600;
 
 /**
- * 기준 보행 속도. 1.25m/s(4.5km/h)는 평지를 성큼성큼 걷는 속도라 국내 지도 앱보다
- * 3분쯤 짧게 나왔다. (상도동 855m 구간: 우리 13분 / 네이버 15~16분)
- * 우리는 경사를 비용에 넣지 않으므로, 오르내림이 섞인 실제 보행을 평균으로 흡수하는
- * 1.0m/s(3.6km/h)로 잡아 국내 앱 표기와 맞춘다.
+ * 기준 보행 속도. 취향(느긋/보통/빠르게)이 없을 때 쓰는 값이다.
+ *
+ * 한때 1.0m/s 로 두고 네이버 표기와 맞췄었다. 그런데 그 시절에는 경사를 비용에 넣지
+ * 않아서, 오르내림을 속도로 뭉뚱그려 흡수시킨 것이었다. 지금은 오르막을 1m 당 6초로
+ * 따로 더하고 횡단보도 대기도 따로 세므로, 기준 속도까지 느리게 두면 이중으로 깎인다.
+ * (상도동 531m 평지 구간을 9.3분으로 봤는데, 걷는 사람도 그늘로도 6~7분으로 본다)
  */
-const WALK_SPEED_MPS = 1.0;
+const WALK_SPEED_MPS = 1.25;
 
 /** 가장 빠른 노면 기준 1m 당 최소 소요 시간 — A* 휴리스틱이 실제 비용을 넘지 않게 하는 데 쓴다 */
 /**
  * 휴리스틱은 **가장 빠른 경우**를 기준으로 잡아야 실제 비용을 넘지 않는다.
  * 걷는 속도가 취향에 따라 1.25m/s 까지 올라가므로 그 값으로 계산한다.
  */
-const MAX_SPEED_MPS = 1.25;
+const MAX_SPEED_MPS = 1.5;
 const MIN_SEC_PER_M = 1 / (MAX_SPEED_MPS * Math.max(...Object.values(KIND_SPEED)));
+
+/**
+ * 간선 하나의 길이 상한(m). 이보다 길면 중간에 노드를 심어 잘라 둔다.
+ *
+ * 출발지·도착지·정류장을 그래프에 붙일 때 붙을 수 있는 자리는 **노드뿐**이다. 그런데
+ * 큰길이나 자전거도로는 꺾이지 않는 한 점을 찍지 않아, 100m 가까이 붙을 자리가 없는
+ * 구간이 흔하다. 봉천역 앞이 그랬다 — 정류장에서 6번 출구까지 실제로는 39m 인데,
+ * 길 옆에 올라설 자리가 없어 80m 짜리 간선의 양 끝을 돌아 173m 를 걷는 답이 나왔다.
+ * 길 중간에서도 길에 올라설 수 있어야 하므로 미리 잘라 둔다.
+ *
+ * 횡단보도만 그대로 둔다 — 대기 시간을 간선 하나당 한 번씩 세기 때문에, 자르면
+ * 신호를 두세 번 기다리는 셈이 된다.
+ */
+const MAX_EDGE_M = 25;
 
 export function buildGraph(ways: WalkWay[], refLat = 37.5, cellMeters = 80): Graph {
   const index = new Map<string, number>();
@@ -111,11 +127,14 @@ export function buildGraph(ways: WalkWay[], refLat = 37.5, cellMeters = 80): Gra
       const b = w.path[i];
       const len = distMeters(a, b);
       if (len < 0.3) continue;
-      const ia = idOf(a);
-      const ib = idOf(b);
-      if (ia === ib) continue;
+      // 고도 차이는 방향에 따라 한쪽만 오르막이다
+      const rise = w.elev ? w.elev[i] - w.elev[i - 1] : 0;
+
+      const parts = w.kind === "crossing" ? 1 : Math.max(1, Math.ceil(len / MAX_EDGE_M));
+      const at = (t: number): LngLat =>
+        t <= 0 ? a : t >= 1 ? b : [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
       const base = {
-        length: len,
+        length: len / parts,
         kind: w.kind,
         covered: !!w.covered,
         major: !!w.major,
@@ -123,10 +142,17 @@ export function buildGraph(ways: WalkWay[], refLat = 37.5, cellMeters = 80): Gra
         safety: 0,
         name: w.name,
       };
-      // 고도 차이는 방향에 따라 한쪽만 오르막이다
-      const rise = w.elev ? w.elev[i] - w.elev[i - 1] : 0;
-      adj[ia].push({ ...base, to: ib, path: [a, b], climb: Math.max(0, rise) });
-      adj[ib].push({ ...base, to: ia, path: [b, a], climb: Math.max(0, -rise) });
+      const step = rise / parts;
+
+      for (let k = 0; k < parts; k++) {
+        const p = at(k / parts);
+        const q = at((k + 1) / parts);
+        const ip = idOf(p);
+        const iq = idOf(q);
+        if (ip === iq) continue;
+        adj[ip].push({ ...base, to: iq, path: [p, q], climb: Math.max(0, step) });
+        adj[iq].push({ ...base, to: ip, path: [q, p], climb: Math.max(0, -step) });
+      }
     }
   }
 
@@ -228,7 +254,8 @@ export function applySafety(graph: Graph, safety: SafetyIndex) {
 }
 
 /** 좌표 주변의 그래프 노드들을 가까운 순으로 (반경 내) */
-function nearbyNodes(graph: Graph, p: LngLat, maxMeters: number, limit = 16): number[] {
+// 간선을 잘라 두면서 노드가 촘촘해졌으므로, 후보를 좁게 잡으면 한 골목 안에서만 고르게 된다
+function nearbyNodes(graph: Graph, p: LngLat, maxMeters: number, limit = 32): number[] {
   const cx = Math.floor(p[0] / graph.cellLng);
   const cy = Math.floor(p[1] / graph.cellLat);
   const found: { i: number; d: number }[] = [];
@@ -457,6 +484,13 @@ function search(graph: Graph, from: number, to: number, w: RouteWeights): Edge[]
 
 function toResult(edges: Edge[], start: LngLat, end: LngLat, speedMps = WALK_SPEED_MPS): RouteResult {
   const path: LngLat[] = [start];
+  /** 같은 점을 두 번 넣지 않으면서 이어 붙인다 */
+  const extend = (pts: LngLat[]) => {
+    for (const q of pts) {
+      const tail = path[path.length - 1];
+      if (tail[0] !== q[0] || tail[1] !== q[1]) path.push(q);
+    }
+  };
   const segments: { path: LngLat[]; shade: number }[] = [];
   let distance = 0;
   let seconds = 0;
@@ -468,7 +502,10 @@ function toResult(edges: Edge[], start: LngLat, end: LngLat, speedMps = WALK_SPE
   const streets: RouteResult["streets"] = [];
 
   for (const e of edges) {
-    for (let i = 1; i < e.path.length; i++) path.push(e.path[i]);
+    // 첫 점까지 넣어야 한다 — 예전에는 i=1 부터 넣어서 **그래프에 붙은 첫 노드가 빠졌다**.
+    // 그러면 그려지는 선이 출발점에서 두 번째 노드로 곧장 건너뛰고, 붙는 거리(approach)도
+    // 그만큼 부풀려져 잡혔다 (봉천역 앞 78m·1.3분 → 실제 58m·47초).
+    extend(e.path);
     distance += e.length;
     // 표시하는 소요 시간에는 취향 가산을 넣지 않는다 — 걷는 속도만 반영한다
     seconds += edgeTime(e, 1, speedMps);
@@ -493,7 +530,7 @@ function toResult(edges: Edge[], start: LngLat, end: LngLat, speedMps = WALK_SPE
       segments.push({ path: e.path.slice(), shade: e.shade });
     }
   }
-  path.push(end);
+  extend([end]);
 
   // 그래프에 스냅되기까지의 접근 거리도 합산
   const approach =
