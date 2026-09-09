@@ -141,3 +141,46 @@ export function resample(path: LngLat[], stepM: number): LngLat[] {
   if (distMeters(out[out.length - 1], last) > 0.5) out.push(last);
   return out;
 }
+
+/**
+ * 점과 선분 사이 거리(m). 몇 km 안에서 쓰는 값이라 평면 근사로 충분하다.
+ * (선로 판정·노선 형상 맞추기처럼 좁은 범위에서만 쓴다)
+ */
+export function distToSegment(p: LngLat, a: LngLat, b: LngLat) {
+  const kx = mPerDegLon((a[1] + b[1]) / 2);
+  const px = (p[0] - a[0]) * kx;
+  const py = (p[1] - a[1]) * EARTH_M_PER_DEG_LAT;
+  const bx = (b[0] - a[0]) * kx;
+  const by = (b[1] - a[1]) * EARTH_M_PER_DEG_LAT;
+  const len2 = bx * bx + by * by;
+  const t = len2 > 0 ? Math.max(0, Math.min(1, (px * bx + py * by) / len2)) : 0;
+  return Math.hypot(px - bx * t, py - by * t);
+}
+
+/**
+ * 모양을 유지한 채 점을 줄인다 (Douglas–Peucker).
+ * 노선 형상은 2~5m 간격으로 오는데, 지도에 그리는 데는 그만큼 촘촘할 필요가 없다.
+ */
+export function simplifyPath(points: LngLat[], toleranceM: number): LngLat[] {
+  if (points.length < 3) return points;
+  const keep = new Uint8Array(points.length);
+  keep[0] = 1;
+  keep[points.length - 1] = 1;
+  const stack: [number, number][] = [[0, points.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop()!;
+    let far = -1;
+    let farD = toleranceM;
+    for (let i = a + 1; i < b; i++) {
+      const d = distToSegment(points[i], points[a], points[b]);
+      if (d > farD) {
+        farD = d;
+        far = i;
+      }
+    }
+    if (far < 0) continue;
+    keep[far] = 1;
+    stack.push([a, far], [far, b]);
+  }
+  return points.filter((_, i) => keep[i] === 1);
+}

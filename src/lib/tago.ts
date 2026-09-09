@@ -14,6 +14,7 @@
  */
 
 import { distMeters, type LngLat } from "./geo";
+import { tagoBusColor } from "./busColor";
 import {
   ARRIVAL_HORIZON_S,
   type Arrival,
@@ -146,9 +147,11 @@ async function nearbyStops(p: LngLat, radius: number): Promise<TagoStop[]> {
 }
 
 /** 정류소를 지나는 노선 */
-async function routesOfStop(stop: TagoStop): Promise<{ routeId: string; routeNo: string; cityCode: string }[]> {
+type TagoRoute = { routeId: string; routeNo: string; cityCode: string; routeType: string };
+
+async function routesOfStop(stop: TagoStop): Promise<TagoRoute[]> {
   const key = `routes:${stop.cityCode}:${stop.nodeId}`;
-  const hit = getCached<{ routeId: string; routeNo: string; cityCode: string }[]>(key, STOP_TTL);
+  const hit = getCached<TagoRoute[]>(key, STOP_TTL);
   if (hit) return hit;
 
   const json = await call(BASE_STOP, "getSttnThrghRouteList", {
@@ -163,6 +166,8 @@ async function routesOfStop(stop: TagoStop): Promise<{ routeId: string; routeNo:
       routeId: str(it.routeid),
       routeNo: str(it.routeno),
       cityCode: stop.cityCode,
+      // "일반버스" · "직행좌석버스" 처럼 말로 온다. 화면 색이 여기서 갈린다
+      routeType: str(it.routetp),
     }))
     .filter((r) => r.routeId);
 
@@ -236,8 +241,8 @@ export async function fetchTagoBuses(
     pooled(pick(nearB), routesOfStop),
   ]);
 
-  const flat = (groups: { routeId: string; routeNo: string; cityCode: string }[][]) => {
-    const m = new Map<string, { routeId: string; routeNo: string; cityCode: string }>();
+  const flat = (groups: TagoRoute[][]) => {
+    const m = new Map<string, TagoRoute>();
     for (const g of groups) for (const r of g) m.set(`${r.cityCode}:${r.routeId}`, r);
     return m;
   };
@@ -286,6 +291,7 @@ export async function fetchTagoBuses(
         ref: route.routeNo,
         name: `${route.routeNo}번 버스`,
         mode: "bus",
+        colour: tagoBusColor(route.routeType),
         headsign: stops.get(ids[ids.length - 1])?.name,
         stops: ids,
         live: { src: "tago", routeId: route.routeId },

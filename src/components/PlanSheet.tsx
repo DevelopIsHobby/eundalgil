@@ -6,6 +6,8 @@ import { formatClockKo, formatFare, type Leg, type Plan, type RideLeg, type Walk
 import { MODE_LABEL } from "@/lib/transit";
 import { SIDE_LABEL } from "@/lib/seat";
 import SeatDiagram from "./SeatDiagram";
+// 지도와 시트가 같은 색을 써야 한 여정으로 읽힌다
+import { rideColorOf as rideColor } from "./MapView";
 import { IconBus, IconLeaf, IconSubway, IconSun, IconWalk } from "./icons";
 
 /** 수단 막대 — 도보/승차 시간을 비율대로 늘어놓는다 */
@@ -56,11 +58,6 @@ function legSeconds(leg: Leg) {
     : leg.ride.rideSec + (leg.startMs - leg.arriveMs) / 1000;
 }
 
-function rideColor(leg: RideLeg) {
-  const c = leg.ride.pattern.colour;
-  if (c && /^#?[0-9a-f]{6}$/i.test(c)) return c.startsWith("#") ? c : `#${c}`;
-  return leg.ride.pattern.mode === "bus" ? "#2E6FF2" : "#5B4CE0";
-}
 
 function WalkLegRow({ leg }: { leg: WalkLeg }) {
   const pct = Math.round(leg.route.shadeRatio * 100);

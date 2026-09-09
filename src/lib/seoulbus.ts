@@ -11,7 +11,8 @@
  *   3) busRouteInfo/getStaionByRoute — 노선이 지나는 정류소 순서
  */
 
-import { distMeters, type LngLat } from "./geo";
+import { distMeters, simplifyPath, type LngLat } from "./geo";
+import { seoulBusColor } from "./busColor";
 import {
   ARRIVAL_HORIZON_S,
   type Arrival,
@@ -27,6 +28,19 @@ const STOP_TTL = 60 * 60 * 1000;
 const CONCURRENCY = 6;
 const MAX_ROUTES = 48;
 const MAX_STOPS_PER_END = 12;
+/**
+ * 형상(도로를 따라가는 좌표열)을 받아 올 노선 수 상한.
+ * 노선 하나가 400~1500점이라 전부 받으면 응답이 커진다. 직행 후보부터 채운다.
+ */
+const MAX_SHAPES = 16;
+/** 형상을 줄일 때 허용하는 오차(m) — 지도에 그리는 용도라 이 정도면 모양이 유지된다 */
+const SHAPE_TOLERANCE_M = 8;
+/** 정류장을 형상 위 점에 맞출 때 허용하는 거리(m) */
+const STOP_SNAP_M = 150;
+/** 첫 정류장이 붙을 만한 자리를 고를 때 쓰는 거리(m) — 후보를 넓게 잡으면 정렬이 흔들린다 */
+const SEED_SNAP_M = 80;
+/** 두 정류장 사이 형상 길이가 직선거리의 이 배를 넘으면 엉뚱한 곳에 붙은 것이다 */
+const SPAN_SLACK = 3;
 
 export function seoulKey() {
   // `??` 로 이으면 SEOUL_BUS_KEY 가 **빈 문자열**일 때 TAGO 키로 넘어가지 않는다.
@@ -140,18 +154,123 @@ async function nearbyStops(p: LngLat, radius: number): Promise<SeoulStop[]> {
   return stops;
 }
 
-async function routesOfStop(stop: SeoulStop): Promise<{ routeId: string; routeNo: string }[]> {
+type SeoulRoute = { routeId: string; routeNo: string; routeType: string };
+
+async function routesOfStop(stop: SeoulStop): Promise<SeoulRoute[]> {
   const key = `routes:${stop.arsId}`;
-  const hit = getCached<{ routeId: string; routeNo: string }[]>(key, STOP_TTL);
+  const hit = getCached<SeoulRoute[]>(key, STOP_TTL);
   if (hit) return hit;
 
   const json = await call("stationinfo/getRouteByStation", { arsId: stop.arsId });
   const routes = itemsOf(json)
-    .map((it) => ({ routeId: str(it.busRouteId), routeNo: str(it.busRouteAbrv || it.busRouteNm) }))
+    .map((it) => ({
+      routeId: str(it.busRouteId),
+      routeNo: str(it.busRouteAbrv || it.busRouteNm),
+      // 간선·지선·마을… 도색이 달라서 화면 색도 여기서 갈린다
+      routeType: str(it.busRouteType),
+    }))
     .filter((r) => r.routeId);
 
   setCached(key, routes);
   return routes;
+}
+
+/** 노선이 실제로 지나는 길의 좌표열 (정류장을 직선으로 이으면 건물을 뚫고 간다) */
+async function pathOfRoute(routeId: string): Promise<LngLat[] | null> {
+  const key = `path:${routeId}`;
+  const hit = getCached<LngLat[]>(key, ROUTE_TTL);
+  if (hit) return hit;
+
+  const json = await call("busRouteInfo/getRoutePath", { busRouteId: routeId });
+  const pts = itemsOf(json)
+    .map((it) => [num(it.gpsX), num(it.gpsY)] as LngLat)
+    .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+  if (pts.length < 2) return null;
+
+  setCached(key, pts);
+  return pts;
+}
+
+/** 형상을 따라간 누적 거리(m) */
+function cumulative(shape: LngLat[]) {
+  const cum = new Float64Array(shape.length);
+  for (let i = 1; i < shape.length; i++) cum[i] = cum[i - 1] + distMeters(shape[i - 1], shape[i]);
+  return cum;
+}
+
+/**
+ * 첫 정류장 자리를 정해 놓고, 뒤 정류장을 앞으로만 이어 붙인다.
+ * 다음 정류장은 직선거리의 몇 배 안에서만 찾는다 — 멀리까지 뒤지면
+ * 같은 길의 반대 방향 점에 붙어 경로가 되돌아간다.
+ */
+function alignFrom(shape: LngLat[], cum: Float64Array, stops: LngLat[], seed: number) {
+  const idx = [seed];
+  let cost = distMeters(stops[0], shape[seed]);
+  let cursor = seed;
+  for (let k = 1; k < stops.length; k++) {
+    const limit = cum[cursor] + SPAN_SLACK * distMeters(stops[k - 1], stops[k]) + 300;
+    let best = -1;
+    let bestD = STOP_SNAP_M;
+    for (let i = cursor + 1; i < shape.length && cum[i] <= limit; i++) {
+      const d = distMeters(stops[k], shape[i]);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    if (best < 0) return null;
+    idx.push(best);
+    cost += bestD;
+    cursor = best;
+  }
+  return { idx, cost: cost / stops.length };
+}
+
+/**
+ * 정류장을 형상 위의 점에 순서대로 맞춘다.
+ *
+ * 형상은 갈 때와 올 때가 한 줄로 이어져 있고, 마을버스처럼 같은 길을 두 번 지나는
+ * 노선도 흔하다. 그래서 "가장 가까운 점" 하나만 보면 반대 방향 자리에 붙어 버린다.
+ * 첫 정류장이 붙을 만한 자리를 모두 후보로 두고, 전체가 가장 잘 맞는 정렬을 고른다.
+ */
+function matchStops(shape: LngLat[], stops: LngLat[]): number[] | null {
+  const cum = cumulative(shape);
+
+  const seeds: number[] = [];
+  for (let i = 0; i < shape.length; i++) {
+    const d = distMeters(stops[0], shape[i]);
+    if (d > SEED_SNAP_M) continue;
+    // 같은 자리에서 이어지는 점들은 가장 가까운 하나로 묶는다
+    const prev = seeds[seeds.length - 1];
+    if (prev != null && cum[i] - cum[prev] < 200) {
+      if (d < distMeters(stops[0], shape[prev])) seeds[seeds.length - 1] = i;
+      continue;
+    }
+    seeds.push(i);
+  }
+
+  let best: { idx: number[]; cost: number } | null = null;
+  for (const seed of seeds) {
+    const got = alignFrom(shape, cum, stops, seed);
+    if (got && (!best || got.cost < best.cost)) best = got;
+  }
+  return best?.idx ?? null;
+}
+
+/**
+ * 맞춘 정류장 사이를 구간별로 줄여, 정류장이 형상의 몇 번째 점인지까지 함께 낸다.
+ * 구간마다 따로 줄이므로 정류장 자리는 그대로 남는다.
+ */
+function trimShape(raw: LngLat[], idx: number[]) {
+  const shape: LngLat[] = [raw[idx[0]]];
+  const stopIndex: number[] = [0];
+  for (let k = 1; k < idx.length; k++) {
+    const span = simplifyPath(raw.slice(idx[k - 1], idx[k] + 1), SHAPE_TOLERANCE_M);
+    // span[0] 은 앞 정류장 자리라 이미 들어가 있다
+    for (let i = 1; i < span.length; i++) shape.push(span[i]);
+    stopIndex.push(shape.length - 1);
+  }
+  return { shape, stopIndex };
 }
 
 type RouteSeq = { stops: TransitStop[]; direction: string[] };
@@ -209,9 +328,9 @@ export async function fetchSeoulBuses(
     pooled(closest(nearB, destination), routesOfStop),
   ]);
 
-  const toMap = (groups: { routeId: string; routeNo: string }[][]) => {
-    const m = new Map<string, string>();
-    for (const g of groups) for (const r of g) m.set(r.routeId, r.routeNo);
+  const toMap = (groups: SeoulRoute[][]) => {
+    const m = new Map<string, SeoulRoute>();
+    for (const g of groups) for (const r of g) m.set(r.routeId, r);
     return m;
   };
   const mapA = toMap(routesA);
@@ -221,18 +340,24 @@ export async function fetchSeoulBuses(
   const both = [...mapA.keys()].filter((k) => mapB.has(k));
   const rest = [...new Set([...mapA.keys(), ...mapB.keys()])].filter((k) => !both.includes(k));
   const wanted = [...both, ...rest].slice(0, MAX_ROUTES);
+  /** 형상까지 받을 노선 — 실제로 탈 만한 직행 후보부터 */
+  const withShape = new Set(wanted.slice(0, MAX_SHAPES));
 
   const stops = new Map<string, TransitStop>();
   const patterns: TransitPattern[] = [];
 
   const sequences = await pooled(wanted, async (routeId) => ({
     routeId,
-    routeNo: mapA.get(routeId) ?? mapB.get(routeId) ?? "",
+    route: mapA.get(routeId) ?? mapB.get(routeId),
     seq: await stopsOfRoute(routeId),
+    // 형상을 못 받아도 안내는 나가야 한다 — 그때는 정류장을 직선으로 잇는다
+    path: withShape.has(routeId) ? await pathOfRoute(routeId).catch(() => null) : null,
   }));
 
-  for (const { routeId, routeNo, seq } of sequences) {
+  for (const { routeId, route, seq, path } of sequences) {
     if (!seq) continue;
+    const routeNo = route?.routeNo ?? "";
+    const colour = seoulBusColor(route?.routeType ?? "");
     // 상·하행이 한 응답에 같이 오면 방향별로 쪼갠다
     const dirs = new Set(seq.direction.filter(Boolean));
     const groups =
@@ -243,19 +368,33 @@ export async function fetchSeoulBuses(
     groups.forEach((group, gi) => {
       if (group.length < 2) return;
       const ids: string[] = [];
+      const points: LngLat[] = [];
       for (const s of group) {
         if (!stops.has(s.id)) stops.set(s.id, s);
-        if (ids[ids.length - 1] !== s.id) ids.push(s.id);
+        if (ids[ids.length - 1] === s.id) continue;
+        ids.push(s.id);
+        points.push(s.p);
       }
       if (ids.length < 2) return;
+
+      let shape: LngLat[] | undefined;
+      let stopIndex: number[] | undefined;
+      if (path) {
+        const idx = matchStops(path, points);
+        if (idx) ({ shape, stopIndex } = trimShape(path, idx));
+      }
+
       patterns.push({
         id: `sb${routeId}_${gi}`,
         ref: routeNo,
         name: `${routeNo}번 버스`,
         mode: "bus",
+        colour,
         headsign: stops.get(ids[ids.length - 1])?.name,
         stops: ids,
         live: { src: "seoul", routeId },
+        shape,
+        stopIndex,
       });
     });
   }

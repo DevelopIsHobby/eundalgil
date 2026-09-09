@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { EARTH_M_PER_DEG_LAT, mPerDegLon, type LngLat } from "@/lib/geo";
+import { distToSegment, EARTH_M_PER_DEG_LAT, mPerDegLon, type LngLat } from "@/lib/geo";
 import type { TransitData, TransitMode, TransitPattern, TransitStop } from "@/lib/transit";
 import { overpass, type OverpassElement } from "@/lib/overpass";
 import { fetchTagoBuses, hasTagoKey } from "@/lib/tago";
@@ -74,18 +74,6 @@ out geom;`;
 
 /** 노선이 지나는 선로 한 토막 */
 type TrackWay = { tunnel: boolean; geometry: LngLat[] };
-
-/** 점과 선분 사이 거리(m) — 몇 km 안에서 쓰는 값이라 평면 근사로 충분하다 */
-function distToSegment(p: LngLat, a: LngLat, b: LngLat) {
-  const kx = mPerDegLon((a[1] + b[1]) / 2);
-  const px = (p[0] - a[0]) * kx;
-  const py = (p[1] - a[1]) * EARTH_M_PER_DEG_LAT;
-  const bx = (b[0] - a[0]) * kx;
-  const by = (b[1] - a[1]) * EARTH_M_PER_DEG_LAT;
-  const len2 = bx * bx + by * by;
-  const t = len2 > 0 ? Math.max(0, Math.min(1, (px * bx + py * by) / len2)) : 0;
-  return Math.hypot(px - bx * t, py - by * t);
-}
 
 /** 이보다 멀면 그 자리의 선로가 응답에 없는 것으로 본다 */
 const TRACK_MATCH_M = 150;

@@ -6,7 +6,7 @@
  * 수단별 평균 통행 속도로 추정하고, 대기 시간은 배차 평균값을 더한다.
  */
 
-import { distMeters, type LngLat } from "./geo";
+import { distMeters, pathLength, type LngLat } from "./geo";
 
 export type TransitMode = "bus" | "subway" | "tram" | "train";
 
@@ -49,6 +49,13 @@ export type TransitPattern = {
    * 지하 구간에는 햇빛이 들지 않으므로 자리 추천에서 빼야 한다.
    */
   aboveGround?: (number | null)[];
+  /**
+   * 노선이 실제로 지나는 길의 좌표열. 없으면 정류장을 직선으로 잇는다 —
+   * 그러면 지도에서 버스가 건물을 뚫고 가는 것처럼 보인다.
+   */
+  shape?: LngLat[];
+  /** stops[k] 가 shape 의 몇 번째 점인지. 길이는 stops 와 같다 */
+  stopIndex?: number[];
 };
 
 export type TransitData = {
@@ -271,6 +278,27 @@ function rideOf(
   const from = stopsById.get(pattern.stops[i]);
   const to = stopsById.get(pattern.stops[j]);
   if (!from || !to) return null;
+
+  /*
+   * 노선 형상이 있으면 실제 도로를 따라간다. 없으면 정류장을 직선으로 잇는다.
+   * 형상을 쓰면 거리도 실제 주행거리가 되므로 소요 시간까지 함께 맞아떨어진다.
+   */
+  const si = pattern.stopIndex;
+  if (pattern.shape && si && si.length === pattern.stops.length && si[j] > si[i]) {
+    const path = pattern.shape.slice(si[i], si[j] + 1);
+    const distance = pathLength(path);
+    if (path.length < 2 || distance < MIN_RIDE_M) return null;
+    return {
+      pattern,
+      from,
+      to,
+      stopCount: j - i,
+      path,
+      distance,
+      rideSec: distance / MODE_SPEED[pattern.mode],
+      waitSec: MODE_WAIT[pattern.mode],
+    };
+  }
 
   const path: LngLat[] = [];
   const surface: (number | null)[] = [];
