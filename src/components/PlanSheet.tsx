@@ -239,8 +239,11 @@ function LiveTag({ children, warn }: { children: React.ReactNode; warn?: boolean
   );
 }
 
-function RideLegRow({ leg }: { leg: RideLeg }) {
-  const { ride, seat, live } = leg;
+function RideLegRow({ leg, seatKey }: { leg: RideLeg; seatKey: string }) {
+  const { ride, live } = leg;
+  // 건물 그늘까지 넣어 다시 계산한 값이 있으면 그쪽이 더 정확하다
+  const override = useApp((s) => s.seatOverrides[seatKey]);
+  const seat = override ?? leg.seat;
   const color = rideColor(leg);
   const waitMin = Math.round((leg.startMs - leg.arriveMs) / 60000);
   /** 배차간격으로 어림한 값은 실시간이 아니다 — 그때는 평균이라고 말해야 한다 */
@@ -483,7 +486,7 @@ export default function PlanSheet() {
                 leg.type === "walk" ? (
                   <WalkLegRow key={i} leg={leg} />
                 ) : (
-                  <RideLegRow key={i} leg={leg} />
+                  <RideLegRow key={i} leg={leg} seatKey={`${plan.id}:${i}`} />
                 )
               )}
               <li className="flex gap-3">

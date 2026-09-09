@@ -8,6 +8,7 @@ import { DEFAULT_PREFS, loadPrefs, savePrefs, type Prefs } from "./prefs";
 import { DEFAULT_CENTER, DEFAULT_ZOOM } from "./config";
 import type { BasemapId } from "./basemap";
 import type { Shelter } from "./shelters";
+import type { SeatAdvice } from "./seat";
 import { loadSaved, toggleSaved, type SavedTrip } from "./saved";
 
 export type Place = { name: string; address?: string; p: LngLat };
@@ -68,6 +69,11 @@ type State = {
   departure: { atMs: number; shade: number; nowShade: number } | null;
   /** 저장한 길 (출발·도착만 남긴다) */
   saved: SavedTrip[];
+  /**
+   * 건물 그늘까지 넣어 다시 계산한 자리 추천. `${planId}:${구간번호}` 로 찾는다.
+   * 경로가 나온 뒤에 덧칠하는 값이라 여정 자체는 그대로 두고 옆에 둔다.
+   */
+  seatOverrides: Record<string, SeatAdvice>;
   /** 길 안내 중인지 */
   guiding: boolean;
   toast: string | null;
@@ -102,6 +108,7 @@ type Actions = {
   setShelters: (s: Shelter[]) => void;
   setDeparture: (d: { atMs: number; shade: number; nowShade: number } | null) => void;
   hydrateSaved: () => void;
+  setSeatOverride: (key: string, advice: SeatAdvice) => void;
   toggleSave: () => void;
   setGuiding: (v: boolean) => void;
   showToast: (msg: string | null) => void;
@@ -144,6 +151,7 @@ export const useApp = create<State & Actions>((set, get) => ({
   shelters: [],
   departure: null,
   saved: [],
+  seatOverrides: {},
   guiding: false,
   toast: null,
 
@@ -176,7 +184,7 @@ export const useApp = create<State & Actions>((set, get) => ({
   setDataError: (dataError) => set({ dataError }),
 
   setPlans: (plans, planError = null, notices = []) =>
-    set({ plans, planError, notices, planIndex: 0 }),
+    set({ plans, planError, notices, planIndex: 0, seatOverrides: {} }),
   selectPlan: (planIndex) => set({ planIndex }),
   setPlanStyle: (planStyle) => set({ planStyle }),
   setSheetExpanded: (sheetExpanded) => set({ sheetExpanded }),
@@ -186,6 +194,8 @@ export const useApp = create<State & Actions>((set, get) => ({
   setShelters: (shelters) => set({ shelters }),
   setDeparture: (departure) => set({ departure }),
   hydrateSaved: () => set({ saved: loadSaved() }),
+  setSeatOverride: (key, advice) =>
+    set({ seatOverrides: { ...get().seatOverrides, [key]: advice } }),
   toggleSave: () => {
     const { origin, destination } = get();
     if (!origin || !destination) return;
