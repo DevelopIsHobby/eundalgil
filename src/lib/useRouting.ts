@@ -21,11 +21,15 @@ import {
 import { FASTEST_WEIGHTS, weightsFromPrefs, type RouteWeights } from "./prefs";
 import { buildTransitPlan, buildWalkPlan, type PlanPair, type WalkFn } from "./plan";
 import {
+  applyShapes,
   fetchArrivals,
+  fetchShapes,
   fetchTransit,
   indexArrivals,
   planTransit,
+  SEARCH_RADIUS_M,
   type ArrivalIndex,
+  type TransitPattern,
   type TransitStop,
 } from "./transit";
 
@@ -37,8 +41,20 @@ const MAX_TRIP_M = 12000;
 const MIN_TRANSIT_M = 600;
 /** 이 거리까지는 출발·도착을 한 덩어리 데이터로 덮을 수 있다 */
 const SINGLE_BUNDLE_M = 2400;
-/** 먼 구간일 때 양 끝에서 따로 받아 오는 반경(m) — 정류장까지 걷는 길을 그리기 위한 것 */
-const ENDPOINT_PAD_M = 900;
+/**
+ * 먼 구간일 때 양 끝에서 따로 받아 오는 반경(m) — 정류장까지 걷는 길을 그리기 위한 것.
+ * 걸어갈 수 있다고 본 정류장은 모두 덮어야 한다. 좁으면 그 정류장까지 가는 길을
+ * 못 찾아 해당 노선이 통째로 후보에서 빠진다. 길은 직선보다 도니 여유를 둔다.
+ */
+const ENDPOINT_PAD_M = Math.round(SEARCH_RADIUS_M * 1.3);
+/**
+ * 대중교통 후보를 넉넉히 뽑아 둔다.
+ * 후보는 도보를 직선으로 어림해 고르므로, 막상 계산하면 정류장까지 걷는 길이 없어
+ * 통째로 빠질 수 있다. 딱 필요한 만큼만 뽑으면 그때 안내가 0개가 된다.
+ */
+const TRANSIT_CANDIDATES = 10;
+/** 그중 실제로 화면에 올릴 수 */
+const MAX_TRANSIT_PLANS = 4;
 
 type Ctx = { bbox: BBox; graph: Graph };
 
@@ -81,13 +97,13 @@ const STRAIGHT_GAP_M = 120;
  * 정류장 코앞의 짧은 틈만 직선으로 메운다.
  */
 function makeWalk(ctxs: Ctx[], weights: RouteWeights): WalkFn {
-  return (a: LngLat, b: LngLat): RouteResult | null => {
+  return (a: LngLat, b: LngLat, maxStraight = STRAIGHT_GAP_M): RouteResult | null => {
     for (const c of ctxs) {
       if (!bboxContains(c.bbox, a) || !bboxContains(c.bbox, b)) continue;
       const r = routeBetween(c.graph, a, b, weights);
       if (r) return r;
     }
-    return distMeters(a, b) <= STRAIGHT_GAP_M ? straightRoute(a, b) : null;
+    return distMeters(a, b) <= maxStraight ? straightRoute(a, b) : null;
   };
 }
 
@@ -227,7 +243,27 @@ export function useRouting() {
           if (!transit) {
             notices.push("대중교통 노선 정보를 불러오지 못했어요. 도보 경로만 보여드려요.");
           } else {
-            const candidates = planTransit(transit, origin.p, destination.p, 4);
+            let candidates = planTransit(transit, origin.p, destination.p, TRANSIT_CANDIDATES);
+
+            /*
+             * 후보가 정해졌으니 그 노선의 형상(도로를 따라가는 좌표열)을 받아 다시 짠다.
+             * 근처 노선을 통째로 받으면 응답이 너무 커서 미리 받아 둘 수가 없다.
+             * 형상이 붙으면 지도에 도로를 따라 그려지고, 거리·시간도 실제 주행 기준이 된다.
+             */
+            if (candidates.length) {
+              const used = new Map<string, TransitPattern>();
+              for (const c of candidates) for (const r of c.rides) used.set(r.pattern.id, r.pattern);
+              try {
+                const shapes = await fetchShapes(transit, [...used.values()], ctl.signal);
+                if (applyShapes(transit, shapes)) {
+                  candidates = planTransit(transit, origin.p, destination.p, TRANSIT_CANDIDATES);
+                }
+              } catch {
+                /* 형상을 못 받아도 정류장을 직선으로 이어 안내한다 */
+              }
+              if (cancelled) return;
+            }
+
             if (!candidates.length) {
               // 버스가 한 노선도 없으면 "노선이 없다" 가 아니라 "데이터가 없다" 가 맞는 설명이다
               const hasBus = transit.patterns.some((p) => p.mode === "bus");
@@ -256,8 +292,23 @@ export function useRouting() {
               if (cancelled) return;
             }
 
+            // 지도(__map)·상태(__app)와 마찬가지로, 왜 이 노선이 뽑혔는지 콘솔에서 들여다볼 수 있게 한다
+            if (process.env.NODE_ENV === "development") {
+              (window as unknown as { __transit?: unknown }).__transit = { data: transit, candidates };
+            }
+
             let dropped = 0;
+            let kept = 0;
+            /*
+             * 같은 노선 조합은 한 번만 보여 준다.
+             * 타는 정류장이나 내리는 역만 다른 안이 여럿 나오면 네 칸이 "동작08 → 9호선"
+             * 으로만 채워져, 정작 다른 노선 안이 밀려난다. 가장 빠른 것 하나만 남긴다.
+             */
+            const shownRoutes = new Set<string>();
             for (const cand of candidates) {
+              if (kept >= MAX_TRANSIT_PLANS) break;
+              const routeKey = cand.rides.map((r) => r.pattern.ref || r.pattern.name).join(">");
+              if (shownRoutes.has(routeKey)) continue;
               const base = { ...meta, origin: origin.p, destination: destination.p, arrivals };
               const shade = buildTransitPlan(cand, { ...base, style: "shade", walk: shadeWalk });
               const fast = buildTransitPlan(cand, { ...base, style: "fast", walk: fastWalk });
@@ -276,8 +327,10 @@ export function useRouting() {
                 continue;
               }
               pairs.push({ shade, fast });
+              shownRoutes.add(routeKey);
+              kept++;
             }
-            if (dropped && pairs.length <= 1) {
+            if (dropped && !kept) {
               notices.push("정류장까지 걷는 길이 없거나 걷는 편이 빨라, 일부 노선은 뺐어요.");
             }
           }

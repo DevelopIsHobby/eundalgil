@@ -28,11 +28,6 @@ const STOP_TTL = 60 * 60 * 1000;
 const CONCURRENCY = 6;
 const MAX_ROUTES = 48;
 const MAX_STOPS_PER_END = 12;
-/**
- * 형상(도로를 따라가는 좌표열)을 받아 올 노선 수 상한.
- * 노선 하나가 400~1500점이라 전부 받으면 응답이 커진다. 직행 후보부터 채운다.
- */
-const MAX_SHAPES = 16;
 /** 형상을 줄일 때 허용하는 오차(m) — 지도에 그리는 용도라 이 정도면 모양이 유지된다 */
 const SHAPE_TOLERANCE_M = 8;
 /** 정류장을 형상 위 점에 맞출 때 허용하는 거리(m) */
@@ -340,8 +335,6 @@ export async function fetchSeoulBuses(
   const both = [...mapA.keys()].filter((k) => mapB.has(k));
   const rest = [...new Set([...mapA.keys(), ...mapB.keys()])].filter((k) => !both.includes(k));
   const wanted = [...both, ...rest].slice(0, MAX_ROUTES);
-  /** 형상까지 받을 노선 — 실제로 탈 만한 직행 후보부터 */
-  const withShape = new Set(wanted.slice(0, MAX_SHAPES));
 
   const stops = new Map<string, TransitStop>();
   const patterns: TransitPattern[] = [];
@@ -350,11 +343,9 @@ export async function fetchSeoulBuses(
     routeId,
     route: mapA.get(routeId) ?? mapB.get(routeId),
     seq: await stopsOfRoute(routeId),
-    // 형상을 못 받아도 안내는 나가야 한다 — 그때는 정류장을 직선으로 잇는다
-    path: withShape.has(routeId) ? await pathOfRoute(routeId).catch(() => null) : null,
   }));
 
-  for (const { routeId, route, seq, path } of sequences) {
+  for (const { routeId, route, seq } of sequences) {
     if (!seq) continue;
     const routeNo = route?.routeNo ?? "";
     const colour = seoulBusColor(route?.routeType ?? "");
@@ -368,21 +359,12 @@ export async function fetchSeoulBuses(
     groups.forEach((group, gi) => {
       if (group.length < 2) return;
       const ids: string[] = [];
-      const points: LngLat[] = [];
       for (const s of group) {
         if (!stops.has(s.id)) stops.set(s.id, s);
         if (ids[ids.length - 1] === s.id) continue;
         ids.push(s.id);
-        points.push(s.p);
       }
       if (ids.length < 2) return;
-
-      let shape: LngLat[] | undefined;
-      let stopIndex: number[] | undefined;
-      if (path) {
-        const idx = matchStops(path, points);
-        if (idx) ({ shape, stopIndex } = trimShape(path, idx));
-      }
 
       patterns.push({
         id: `sb${routeId}_${gi}`,
@@ -393,8 +375,6 @@ export async function fetchSeoulBuses(
         headsign: stops.get(ids[ids.length - 1])?.name,
         stops: ids,
         live: { src: "seoul", routeId },
-        shape,
-        stopIndex,
       });
     });
   }
@@ -456,4 +436,22 @@ export async function fetchSeoulArrivals(stopId: string, arsId: string): Promise
   }
 
   return { arrivals, headways };
+}
+
+/**
+ * 노선 하나의 형상을, 주어진 정류장 순서에 맞춰 잘라 돌려준다.
+ *
+ * 형상은 노선당 400~1500점이라 근처 노선을 통째로 받으면 응답도 시간도 감당이 안 된다.
+ * 그래서 안내에 실제로 쓰이는 노선만 나중에 따로 받는다.
+ */
+export async function fetchSeoulShape(
+  routeId: string,
+  stops: LngLat[]
+): Promise<{ shape: LngLat[]; stopIndex: number[] } | null> {
+  if (stops.length < 2) return null;
+  const path = await pathOfRoute(routeId);
+  if (!path) return null;
+  const idx = matchStops(path, stops);
+  if (!idx) return null;
+  return trimShape(path, idx);
 }

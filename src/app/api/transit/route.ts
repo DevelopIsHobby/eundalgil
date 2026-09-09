@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { distToSegment, EARTH_M_PER_DEG_LAT, mPerDegLon, type LngLat } from "@/lib/geo";
-import type { TransitData, TransitMode, TransitPattern, TransitStop } from "@/lib/transit";
+import {
+  ACCESS_RADIUS_M,
+  type TransitData,
+  type TransitMode,
+  type TransitPattern,
+  type TransitStop,
+} from "@/lib/transit";
 import { overpass, type OverpassElement } from "@/lib/overpass";
 import { fetchTagoBuses, hasTagoKey } from "@/lib/tago";
 import { fetchSeoulBuses, seoulKey } from "@/lib/seoulbus";
@@ -300,9 +306,12 @@ export async function GET(req: NextRequest) {
    * TAGO 에는 서울 시내버스가 거의 없어서(강남·사당 근처 몇 개뿐) 서울에서는 쓸 수 없고,
    * TOPIS 는 서울 전용이다. 둘 다 시도해 나오는 쪽을 쓴다.
    */
+  // 반경은 지하철에 맞춰 넓게 들어온다. 버스는 그만큼 멀리 걸어가지 않으므로 좁혀 쓴다
+  // (넓히면 노선 수만 늘어 응답이 느려진다)
+  const busRadius = Math.min(radius, ACCESS_RADIUS_M.bus);
   const sources: [string, () => Promise<{ stops: TransitStop[]; patterns: TransitPattern[] }>][] = [];
-  if (seoulKey()) sources.push(["seoul", () => fetchSeoulBuses(a, b, radius)]);
-  if (hasTagoKey()) sources.push(["tago", () => fetchTagoBuses(a, b, radius)]);
+  if (seoulKey()) sources.push(["seoul", () => fetchSeoulBuses(a, b, busRadius)]);
+  if (hasTagoKey()) sources.push(["tago", () => fetchTagoBuses(a, b, busRadius)]);
 
   let busNotice: string | undefined;
   for (const [name, run] of sources) {

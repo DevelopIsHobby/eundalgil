@@ -97,10 +97,27 @@ export const MODE_LABEL: Record<TransitMode, string> = {
   train: "열차",
 };
 
-/** 정류장까지 걸어갈 수 있다고 보는 최대 직선거리(m) */
-export const ACCESS_RADIUS_M = 800;
+/**
+ * 정류장까지 걸어갈 수 있다고 보는 최대 직선거리(m) — 수단마다 다르다.
+ *
+ * 지하철은 한 정거장이 멀리 데려다주니 사람들이 더 걸어서라도 탄다.
+ * 800m 로 묶어 두면 상도동 → 대치동처럼 "역까지 1km" 인 구간에서 지하철이
+ * 통째로 후보에서 빠지고 버스만 남는다. (삼성중앙역이 993m 라 잘렸었다)
+ */
+export const ACCESS_RADIUS_M: Record<TransitMode, number> = {
+  bus: 800,
+  subway: 1200,
+  tram: 800,
+  train: 1200,
+};
+
+/** 정류장을 찾아 달라고 서버에 넘길 반경 — 가장 넓은 수단에 맞춘다 */
+export const SEARCH_RADIUS_M = Math.max(...Object.values(ACCESS_RADIUS_M));
+
+/** 한쪽 끝에서 고를 정류장 수 — 수단마다 따로 센다 */
+const MAX_ACCESS_PER_MODE = 12;
 /** 환승 도보로 인정하는 최대 직선거리(m) */
-const TRANSFER_RADIUS_M = 260;
+export const TRANSFER_RADIUS_M = 260;
 /** 도보 추정용 — 직선거리에 곱하는 우회 계수 */
 const WALK_DETOUR = 1.3;
 const WALK_MPS = 1.25;
@@ -133,7 +150,7 @@ export async function fetchTransit(
   const qs = new URLSearchParams({
     a: `${origin[0].toFixed(6)},${origin[1].toFixed(6)}`,
     b: `${destination[0].toFixed(6)},${destination[1].toFixed(6)}`,
-    r: String(ACCESS_RADIUS_M),
+    r: String(SEARCH_RADIUS_M),
   });
   const res = await fetch(`/api/transit?${qs}`, { signal });
   if (!res.ok) {
@@ -353,14 +370,30 @@ export function planTransit(
   }
 
   const straight = distMeters(origin, destination);
-  const near = (p: LngLat, radius: number) =>
-    data.stops
-      .map((s) => ({ s, d: distMeters(p, s.p) }))
-      .filter((x) => x.d <= radius)
-      .sort((a, b) => a.d - b.d);
 
-  const originStops = near(origin, ACCESS_RADIUS_M).slice(0, 14);
-  const destStops = near(destination, ACCESS_RADIUS_M).slice(0, 14);
+  /*
+   * 걸어서 갈 수 있는 정류장. 수단별로 나눠서 고른다 —
+   * 한 덩어리로 놓고 가까운 순으로 자르면 촘촘한 버스정류장이 역을 밀어낸다.
+   */
+  const near = (p: LngLat) => {
+    const byMode = new Map<TransitMode, { s: TransitStop; d: number }[]>();
+    for (const s of data.stops) {
+      const d = distMeters(p, s.p);
+      if (d > ACCESS_RADIUS_M[s.mode]) continue;
+      const arr = byMode.get(s.mode);
+      if (arr) arr.push({ s, d });
+      else byMode.set(s.mode, [{ s, d }]);
+    }
+    const out: { s: TransitStop; d: number }[] = [];
+    for (const arr of byMode.values()) {
+      arr.sort((x, y) => x.d - y.d);
+      out.push(...arr.slice(0, MAX_ACCESS_PER_MODE));
+    }
+    return out.sort((a, b) => a.d - b.d);
+  };
+
+  const originStops = near(origin);
+  const destStops = near(destination);
   if (!originStops.length || !destStops.length) return [];
 
   const egressOf = new Map(destStops.map((x) => [x.s.id, x.d]));
@@ -501,4 +534,57 @@ export function planTransit(
     });
   }
   return [...seen.values()];
+}
+
+/* ───────────────────────────── 노선 형상 ───────────────────────────── */
+
+/**
+ * 화면에 안내할 노선들의 형상을 받아 온다.
+ *
+ * 근처 노선을 통째로 받으면 응답이 너무 커서, 후보가 정해진 다음에 그 노선만 받는다.
+ * 형상이 붙으면 지도에 도로를 따라 그려지고, 거리·소요 시간도 실제 주행 기준이 된다.
+ */
+export async function fetchShapes(
+  data: TransitData,
+  patterns: TransitPattern[],
+  signal?: AbortSignal
+): Promise<{ id: string; shape: LngLat[]; stopIndex: number[] }[]> {
+  const stopsById = new Map(data.stops.map((s) => [s.id, s]));
+  const body: { id: string; live: PatternLive; stops: LngLat[] }[] = [];
+  for (const p of patterns) {
+    if (!p.live || p.shape) continue;
+    const stops = p.stops.map((id) => stopsById.get(id)?.p);
+    // 좌표를 못 찾은 정류장이 하나라도 있으면 순서가 어긋난다. 통째로 건너뛴다
+    if (stops.some((s) => !s)) continue;
+    body.push({ id: p.id, live: p.live, stops: stops as LngLat[] });
+  }
+  if (!body.length) return [];
+
+  const res = await fetch("/api/shapes", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ patterns: body }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`노선 형상을 불러오지 못했습니다 (${res.status})`);
+  const json = (await res.json()) as { shapes?: { id: string; shape: LngLat[]; stopIndex: number[] }[] };
+  return json.shapes ?? [];
+}
+
+/** 받은 형상을 노선에 붙인다. 붙인 게 하나라도 있으면 true */
+export function applyShapes(
+  data: TransitData,
+  shapes: { id: string; shape: LngLat[]; stopIndex: number[] }[]
+) {
+  const byId = new Map(shapes.map((s) => [s.id, s]));
+  let changed = false;
+  for (const p of data.patterns) {
+    const got = byId.get(p.id);
+    // 정류장 수와 어긋나면 잘못 맞춘 것이다 — 직선으로 두는 편이 낫다
+    if (!got || got.stopIndex.length !== p.stops.length) continue;
+    p.shape = got.shape;
+    p.stopIndex = got.stopIndex;
+    changed = true;
+  }
+  return changed;
 }
