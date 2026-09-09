@@ -295,7 +295,9 @@ export function useRouting() {
         }
 
         let shadeWalk = makeWalk(ctxs, weights);
-        let fastWalk = makeWalk(ctxs, FASTEST_WEIGHTS);
+        // "최단" 도 걷는 속도만은 그 사람 것을 쓴다 (취향 가산만 뺀 것이다)
+        const plainWeights: RouteWeights = { ...FASTEST_WEIGHTS, speedMps: weights.speedMps };
+        let fastWalk = makeWalk(ctxs, plainWeights);
         /*
          * "지금" 을 보고 있으면 계산에도 진짜 지금을 쓴다.
          * 시각 막대는 값을 스스로 갱신하지 않아 timeMs 가 몇 분씩 묵을 수 있는데,
@@ -370,7 +372,7 @@ export function useRouting() {
               if (added.length) {
                 ctxs = [...ctxs, ...added];
                 shadeWalk = makeWalk(ctxs, weights);
-                fastWalk = makeWalk(ctxs, FASTEST_WEIGHTS);
+                fastWalk = makeWalk(ctxs, plainWeights);
               }
 
               if (prep.live) arrivals = indexArrivals(prep.live);

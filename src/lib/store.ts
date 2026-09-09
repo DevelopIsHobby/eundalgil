@@ -8,6 +8,7 @@ import { DEFAULT_PREFS, loadPrefs, savePrefs, type Prefs } from "./prefs";
 import { DEFAULT_CENTER, DEFAULT_ZOOM } from "./config";
 import type { BasemapId } from "./basemap";
 import type { Shelter } from "./shelters";
+import { loadSaved, toggleSaved, type SavedTrip } from "./saved";
 
 export type Place = { name: string; address?: string; p: LngLat };
 
@@ -65,6 +66,10 @@ type State = {
   shelters: Shelter[];
   /** 같은 길을 이따 걸으면 더 시원할 때, 그 시각 */
   departure: { atMs: number; shade: number; nowShade: number } | null;
+  /** 저장한 길 (출발·도착만 남긴다) */
+  saved: SavedTrip[];
+  /** 길 안내 중인지 */
+  guiding: boolean;
   toast: string | null;
 };
 
@@ -96,6 +101,9 @@ type Actions = {
   setWeather: (w: Weather) => void;
   setShelters: (s: Shelter[]) => void;
   setDeparture: (d: { atMs: number; shade: number; nowShade: number } | null) => void;
+  hydrateSaved: () => void;
+  toggleSave: () => void;
+  setGuiding: (v: boolean) => void;
   showToast: (msg: string | null) => void;
   reset: () => void;
 };
@@ -135,6 +143,8 @@ export const useApp = create<State & Actions>((set, get) => ({
   weather: null,
   shelters: [],
   departure: null,
+  saved: [],
+  guiding: false,
   toast: null,
 
   setScreen: (screen) => set({ screen }),
@@ -175,10 +185,18 @@ export const useApp = create<State & Actions>((set, get) => ({
   setWeather: (weather) => set({ weather }),
   setShelters: (shelters) => set({ shelters }),
   setDeparture: (departure) => set({ departure }),
+  hydrateSaved: () => set({ saved: loadSaved() }),
+  toggleSave: () => {
+    const { origin, destination } = get();
+    if (!origin || !destination) return;
+    set({ saved: toggleSaved(origin, destination) });
+  },
+  setGuiding: (guiding) => set({ guiding }),
   showToast: (toast) => set({ toast }),
   reset: () =>
     set({
       screen: "browse",
+      guiding: false,
       origin: null,
       destination: null,
       plans: [],

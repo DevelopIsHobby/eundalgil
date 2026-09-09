@@ -13,6 +13,8 @@ import SearchOverlay from "@/components/SearchOverlay";
 import Onboarding from "@/components/Onboarding";
 import PrefsSheet from "@/components/PrefsSheet";
 import WeatherCard, { useWeather } from "@/components/WeatherCard";
+import GuideOverlay from "@/components/GuideOverlay";
+import SavedTrips from "@/components/SavedTrips";
 import Toast from "@/components/Toast";
 import { useActivePlan, useApp, type Place } from "@/lib/store";
 import { useRouting } from "@/lib/useRouting";
@@ -50,6 +52,7 @@ export default function Page() {
   /* 저장해 둔 취향을 불러온다 (서버 렌더와 어긋나지 않게 마운트 뒤에) */
   useEffect(() => {
     useApp.getState().hydratePrefs();
+    useApp.getState().hydrateSaved();
     // 지도(window.__map)와 마찬가지로, 개발 중에 콘솔에서 상태를 들여다볼 수 있게 열어 둔다
     if (process.env.NODE_ENV === "development") {
       (window as unknown as { __app?: typeof useApp }).__app = useApp;
@@ -172,7 +175,9 @@ export default function Page() {
   };
 
   const zoomTooLow = store.zoom < MIN_DATA_ZOOM;
-  const sheetOpen = store.screen === "routeResult" && store.sheetExpanded;
+  const guiding = store.guiding && store.screen === "routeResult";
+  // 안내 중에는 화면을 안내에 내준다 — 시트·시각 막대·검색은 잠시 접는다
+  const sheetOpen = (store.screen === "routeResult" && store.sheetExpanded) || guiding;
 
   return (
     <main className="relative h-[100dvh] w-full overflow-hidden bg-[#EDF0F3]">
@@ -183,7 +188,7 @@ export default function Page() {
         ref={topRef}
         className="pointer-events-none absolute inset-x-0 top-0 z-30 mx-auto w-full max-w-[var(--app-max-w)]"
       >
-        {store.screen === "browse" ? (
+        {guiding ? null : store.screen === "browse" ? (
           <TopBar onSearch={() => setEditing("browse")} />
         ) : (
           <>
@@ -217,6 +222,9 @@ export default function Page() {
         className="pointer-events-none absolute inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[var(--app-max-w)]"
       >
         {!sheetOpen && <MapControls bottom={bottomInset + 12} />}
+
+        {/* 홈에서만: 저장한 길 */}
+        {store.screen === "browse" && !picked && <SavedTrips />}
 
         {/* 홈에서만: 날씨 + 길찾기 시작 */}
         {store.screen === "browse" && !picked && (
@@ -256,7 +264,7 @@ export default function Page() {
           />
         )}
 
-        {store.screen === "routeResult" && <PlanSheet />}
+        {store.screen === "routeResult" && !guiding && <PlanSheet />}
       </div>
 
       {editing && (
@@ -279,6 +287,7 @@ export default function Page() {
         />
       )}
 
+      {guiding && <GuideOverlay />}
       {store.prefsOpen && <PrefsSheet />}
       {!store.onboarded && <Onboarding />}
     </main>

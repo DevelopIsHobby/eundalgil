@@ -1,7 +1,7 @@
 "use client";
 
 import { PREF_OPTIONS, type Prefs } from "@/lib/prefs";
-import { IconDetour, IconHill, IconLeaf, IconPeople, IconShield, IconStairs } from "./icons";
+import { IconDetour, IconHill, IconLeaf, IconPeople, IconShield, IconStairs, IconWalk } from "./icons";
 
 /** 세 갈래 중 하나를 고르는 막대. 온보딩과 설정에서 같은 걸 쓴다. */
 function Segmented<T extends string>({
@@ -116,6 +116,15 @@ export default function PrefControls({
             />
           </span>
         </label>
+      </Card>
+
+      <Card icon={<IconWalk />} title="걷는 속도" hint="소요 시간이 몸에 맞아야 계획이 선다">
+        <Segmented
+          name="걷는 속도"
+          value={prefs.pace}
+          options={PREF_OPTIONS.pace}
+          onChange={(pace) => onChange({ pace })}
+        />
       </Card>
 
       <Card icon={<IconPeople />} title="길 분위기">

@@ -263,3 +263,9 @@ export const IconShelter = (p: P) => (
     <path d="M10 20v-4h4v4" />
   </svg>
 );
+
+export const IconNavigate = (p: P) => (
+  <svg {...base(p)}>
+    <path d="m4 11 16-7-7 16-2-7-7-2Z" />
+  </svg>
+);

@@ -12,6 +12,7 @@
  */
 
 import { distMeters, type LngLat } from "./geo";
+import { readJson, writeJson } from "./diskCache";
 import { shapeAlong } from "./shape";
 import { seoulBusColor } from "./busColor";
 import {
@@ -186,6 +187,13 @@ async function stopsOfRoute(routeId: string): Promise<RouteSeq | null> {
   const hit = getCached<RouteSeq>(key, ROUTE_TTL);
   if (hit) return hit;
 
+  // 노선이 지나는 정류장 순서는 거의 바뀌지 않는다. 프로세스를 다시 띄워도 다시 받지 않게 한다
+  const saved = await readJson<RouteSeq>("seoulbus", key, ROUTE_TTL);
+  if (saved) {
+    setCached(key, saved);
+    return saved;
+  }
+
   const json = await call("busRouteInfo/getStaionByRoute", { busRouteId: routeId });
   const rows = itemsOf(json)
     .map((it) => {
@@ -209,6 +217,7 @@ async function stopsOfRoute(routeId: string): Promise<RouteSeq | null> {
   if (rows.length < 2) return null;
   const value: RouteSeq = { stops: rows.map((r) => r.stop), direction: rows.map((r) => r.direction) };
   setCached(key, value);
+  void writeJson("seoulbus", key, value);
   return value;
 }
 

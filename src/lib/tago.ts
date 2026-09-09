@@ -14,6 +14,7 @@
  */
 
 import { distMeters, type LngLat } from "./geo";
+import { readJson, writeJson } from "./diskCache";
 import { tagoBusColor } from "./busColor";
 import {
   ARRIVAL_HORIZON_S,
@@ -183,6 +184,12 @@ async function stopsOfRoute(cityCode: string, routeId: string): Promise<RouteSto
   const hit = getCached<RouteStops>(key, ROUTE_TTL);
   if (hit) return hit;
 
+  const saved = await readJson<RouteStops>("tago", key, ROUTE_TTL);
+  if (saved) {
+    setCached(key, saved);
+    return saved;
+  }
+
   const json = await call(BASE_ROUTE, "getRouteAcctoThrghSttnList", {
     cityCode,
     routeId,
@@ -213,6 +220,7 @@ async function stopsOfRoute(cityCode: string, routeId: string): Promise<RouteSto
     updown: rows.map((r) => r.updown),
   };
   setCached(key, value);
+  void writeJson("tago", key, value);
   return value;
 }
 

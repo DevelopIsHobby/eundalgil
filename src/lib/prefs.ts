@@ -7,6 +7,7 @@ export type SunTaste = "sun" | "balanced" | "shade";
 export type Tolerance = "avoid" | "balanced" | "ok";
 export type Vibe = "quiet" | "balanced" | "lively";
 export type Detour = "short" | "balanced" | "relaxed";
+export type Pace = "slow" | "normal" | "fast";
 
 export type Prefs = {
   /** 햇빛 취향 */
@@ -23,6 +24,18 @@ export type Prefs = {
   detour: Detour;
   /** 야간 방범시설 많은 길 안내 */
   nightSafety: boolean;
+  /** 걷는 속도 — 소요 시간이 몸에 맞아야 계획이 선다 */
+  pace: Pace;
+};
+
+/**
+ * 걷는 속도(m/s). 기본값 1.0 은 국내 지도 앱(네이버)과 맞춘 값이다.
+ * 성큼성큼 걷는 사람은 1.25 쯤 나오고, 그 차이가 2km 에서 7분이 된다.
+ */
+export const PACE_MPS: Record<Pace, number> = {
+  slow: 0.85,
+  normal: 1.0,
+  fast: 1.25,
 };
 
 export const DEFAULT_PREFS: Prefs = {
@@ -33,6 +46,7 @@ export const DEFAULT_PREFS: Prefs = {
   vibe: "balanced",
   detour: "balanced",
   nightSafety: true,
+  pace: "normal",
 };
 
 export const PREF_OPTIONS = {
@@ -61,6 +75,11 @@ export const PREF_OPTIONS = {
     { id: "balanced", label: "균형" },
     { id: "relaxed", label: "여유 있게" },
   ],
+  pace: [
+    { id: "slow", label: "느긋하게" },
+    { id: "normal", label: "보통" },
+    { id: "fast", label: "빠르게" },
+  ],
 } as const;
 
 /** 온보딩 마지막 장면에 띄우는 요약 칩 */
@@ -72,12 +91,14 @@ export function prefChips(p: Prefs) {
     : { avoid: "계단 회피", balanced: "계단 균형", ok: "계단 괜찮음" }[p.steps];
   const vibe = { quiet: "조용한 길", balanced: "혼잡 균형", lively: "활기찬 길" }[p.vibe];
   const detour = { short: "거리 최단", balanced: "거리 균형", relaxed: "여유 있게" }[p.detour];
+  const pace = { slow: "느긋한 걸음", normal: "보통 걸음", fast: "빠른 걸음" }[p.pace];
   return [
     { label: sun, tone: "green" as const },
     { label: hill, tone: "blue" as const },
     { label: steps, tone: "orange" as const },
     { label: vibe, tone: "purple" as const },
     { label: detour, tone: "sky" as const },
+    { label: pace, tone: "green" as const },
     ...(p.nightSafety ? [{ label: "야간 방범시설 안내 사용", tone: "yellow" as const }] : []),
   ];
 }
@@ -97,6 +118,8 @@ export type RouteWeights = {
   excludeSteps: boolean;
   /** 오르막에 드는 시간에 곱하는 배율 (언덕 회피) */
   hillPenalty: number;
+  /** 평지 기준 걷는 속도(m/s) */
+  speedMps: number;
   /** 큰길에 붙이는 가산 (조용한 길 선호) */
   majorPenalty: number;
   /** 이면도로에 붙이는 가산 (활기찬 길 선호) */
@@ -111,6 +134,7 @@ export const FASTEST_WEIGHTS: RouteWeights = {
   stepPenalty: 1,
   excludeSteps: false,
   hillPenalty: 1,
+  speedMps: PACE_MPS.normal,
   majorPenalty: 0,
   minorPenalty: 0,
   darkPenalty: 0,
@@ -132,6 +156,7 @@ export function weightsFromPrefs(p: Prefs, isDay: boolean): RouteWeights {
     stepPenalty: p.excludeSteps ? 1 : { avoid: 2.6, balanced: 1.2, ok: 1 }[p.steps],
     excludeSteps: p.excludeSteps,
     hillPenalty: { avoid: 2.2, balanced: 1.25, ok: 1 }[p.hill],
+    speedMps: PACE_MPS[p.pace] ?? PACE_MPS.normal,
     majorPenalty: p.vibe === "quiet" ? 0.35 * g : 0,
     minorPenalty: p.vibe === "lively" ? 0.3 * g : 0,
     darkPenalty: !isDay && p.nightSafety ? 0.8 * g : 0,

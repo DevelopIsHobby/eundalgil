@@ -10,7 +10,18 @@ import SeatDiagram from "./SeatDiagram";
 import { rideColorOf as rideColor } from "./MapView";
 import { sheltersNearPath, type Shelter } from "@/lib/shelters";
 import { getSunState } from "@/lib/sun";
-import { IconBus, IconClock, IconLeaf, IconShelter, IconSubway, IconSun, IconWalk } from "./icons";
+import { isSaved } from "@/lib/saved";
+import {
+  IconBookmark,
+  IconBus,
+  IconClock,
+  IconLeaf,
+  IconNavigate,
+  IconShelter,
+  IconSubway,
+  IconSun,
+  IconWalk,
+} from "./icons";
 
 /**
  * 햇빛 아래 걷는 거리와 그때의 체감온도.
@@ -71,6 +82,36 @@ function DepartureHint() {
       </span>
       <span className="shrink-0 rounded-md bg-white px-2 py-1 text-[11px] font-bold">그때로 보기</span>
     </button>
+  );
+}
+
+/** 시트 아래 두 단추 — 저장해 두거나, 지금 따라 걷거나 */
+function PlanActions() {
+  const { origin, destination, saved, toggleSave, setGuiding, showToast } = useApp();
+  const on = isSaved(saved, origin, destination);
+  return (
+    <div className="mt-3 flex gap-2 px-4">
+      <button
+        onClick={() => {
+          toggleSave();
+          showToast(on ? "저장을 취소했어요." : "저장했어요.");
+        }}
+        aria-pressed={on}
+        className={`flex items-center justify-center gap-1.5 rounded-2xl px-5 py-3.5 text-[15px] font-bold ${
+          on ? "bg-brand-soft text-brand" : "bg-[#F2F4F6] text-ink-700"
+        }`}
+      >
+        <IconBookmark className="h-[18px] w-[18px]" />
+        {on ? "저장됨" : "저장"}
+      </button>
+      <button
+        onClick={() => setGuiding(true)}
+        className="flex flex-1 items-center justify-center gap-1.5 rounded-2xl bg-brand py-3.5 text-[16px] font-bold text-white active:bg-brand-dark"
+      >
+        <IconNavigate className="h-[18px] w-[18px]" />
+        안내 시작
+      </button>
+    </div>
   );
 }
 
@@ -467,6 +508,9 @@ export default function PlanSheet() {
             {n}
           </p>
         ))}
+
+      {/* 저장 · 안내 시작 */}
+      {!routing && plan && <PlanActions />}
 
       {/* 범례 — 펼쳤을 때만 (접었을 때 넣으면 지도가 더 줄어든다) */}
       <div

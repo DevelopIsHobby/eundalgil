@@ -82,7 +82,12 @@ const ASCENT_SEC_PER_M = 3600 / 600;
 const WALK_SPEED_MPS = 1.0;
 
 /** 가장 빠른 노면 기준 1m 당 최소 소요 시간 — A* 휴리스틱이 실제 비용을 넘지 않게 하는 데 쓴다 */
-const MIN_SEC_PER_M = 1 / (WALK_SPEED_MPS * Math.max(...Object.values(KIND_SPEED)));
+/**
+ * 휴리스틱은 **가장 빠른 경우**를 기준으로 잡아야 실제 비용을 넘지 않는다.
+ * 걷는 속도가 취향에 따라 1.25m/s 까지 올라가므로 그 값으로 계산한다.
+ */
+const MAX_SPEED_MPS = 1.25;
+const MIN_SEC_PER_M = 1 / (MAX_SPEED_MPS * Math.max(...Object.values(KIND_SPEED)));
 
 export function buildGraph(ways: WalkWay[], refLat = 37.5, cellMeters = 80): Graph {
   const index = new Map<string, number>();
@@ -320,8 +325,8 @@ export type RouteResult = {
 };
 
 /** 간선 하나를 걷는 데 걸리는 실제 시간(초) */
-function edgeTime(e: Edge, hillPenalty = 1) {
-  const speed = WALK_SPEED_MPS * (KIND_SPEED[e.kind] ?? 1);
+function edgeTime(e: Edge, hillPenalty = 1, speedMps = WALK_SPEED_MPS) {
+  const speed = speedMps * (KIND_SPEED[e.kind] ?? 1);
   return (
     e.length / speed +
     // 언덕을 피하고 싶다는 취향은 "오르막이 실제보다 더 힘들게 느껴진다"로 번역한다
@@ -390,7 +395,7 @@ class MinHeap {
 function edgeCost(e: Edge, w: RouteWeights) {
   if (w.excludeSteps && e.kind === "steps") return Infinity;
 
-  let t = edgeTime(e, w.hillPenalty);
+  let t = edgeTime(e, w.hillPenalty, w.speedMps);
   if (e.kind === "steps") t *= w.stepPenalty;
 
   // 가산은 모두 1 이상의 배율로만 붙인다. 비용이 실제 소요 시간보다 작아지지 않아야
@@ -450,7 +455,7 @@ function search(graph: Graph, from: number, to: number, w: RouteWeights): Edge[]
   return edges;
 }
 
-function toResult(edges: Edge[], start: LngLat, end: LngLat): RouteResult {
+function toResult(edges: Edge[], start: LngLat, end: LngLat, speedMps = WALK_SPEED_MPS): RouteResult {
   const path: LngLat[] = [start];
   const segments: { path: LngLat[]; shade: number }[] = [];
   let distance = 0;
@@ -465,7 +470,8 @@ function toResult(edges: Edge[], start: LngLat, end: LngLat): RouteResult {
   for (const e of edges) {
     for (let i = 1; i < e.path.length; i++) path.push(e.path[i]);
     distance += e.length;
-    seconds += edgeTime(e);
+    // 표시하는 소요 시간에는 취향 가산을 넣지 않는다 — 걷는 속도만 반영한다
+    seconds += edgeTime(e, 1, speedMps);
     shadeWeighted += e.shade * e.length;
     safetyWeighted += e.safety * e.length;
     if (e.kind === "steps") stepsMeters += e.length;
@@ -497,7 +503,7 @@ function toResult(edges: Edge[], start: LngLat, end: LngLat): RouteResult {
   return {
     path,
     distance: total,
-    duration: seconds + approach / WALK_SPEED_MPS,
+    duration: seconds + approach / speedMps,
     shadeRatio: distance > 0 ? shadeWeighted / distance : 0,
     safetyRatio: distance > 0 ? safetyWeighted / distance : 0,
     stepsMeters,
@@ -531,7 +537,7 @@ export function routeBetween(
   // 계단을 완전히 뺐더니 길이 끊기면, 그 조건만 풀어서 한 번 더 찾는다
   if (!edges && w.excludeSteps) edges = search(graph, s, t, { ...w, excludeSteps: false });
   if (!edges) return null;
-  return toResult(edges, start, end);
+  return toResult(edges, start, end, w.speedMps);
 }
 
 export function findRoutes(
@@ -555,10 +561,12 @@ export function findRoutes(
   }
   const [s, t] = pair;
 
-  const fastEdges = search(graph, s, t, FASTEST_WEIGHTS);
+  // 길을 고를 때만 취향을 뺀다. 걷는 속도는 그대로 둬야 시간이 견줄 만해진다
+  const fastEdges = search(graph, s, t, { ...FASTEST_WEIGHTS, speedMps: weights.speedMps });
   if (!fastEdges)
     return { routes: [], error: "경로를 찾지 못했습니다. 조금 더 가까운 지점으로 시도해 주세요." };
-  const fast = toResult(fastEdges, start, end);
+  // 최단 경로도 "이 사람이 걷는 속도" 로 재야 두 경로의 시간이 견줄 만해진다
+  const fast = toResult(fastEdges, start, end, weights.speedMps);
 
   const routes: RouteOption[] = [{ ...fast, id: "fast", label: "최단" }];
 
@@ -568,7 +576,7 @@ export function findRoutes(
     if (!prefEdges && weights.excludeSteps)
       prefEdges = search(graph, s, t, { ...weights, excludeSteps: false });
     if (prefEdges) {
-      const pref = toResult(prefEdges, start, end);
+      const pref = toResult(prefEdges, start, end, weights.speedMps);
       const sameLength = Math.abs(pref.distance - fast.distance) < 5;
       const sameShade = Math.abs(pref.shadeRatio - fast.shadeRatio) < 0.02;
       if (!(sameLength && sameShade)) routes.push({ ...pref, id: "shade", label: preferLabel });
