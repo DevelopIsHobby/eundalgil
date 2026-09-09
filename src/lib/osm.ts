@@ -29,9 +29,14 @@ export type OsmBundle = {
   ways: WalkWay[];
   /** 방범시설 (야간 모드) */
   safety: SafetyPoint[];
+  /** 지하철 출입구 */
+  entrances: Entrance[];
   bbox: [number, number, number, number]; // minLng,minLat,maxLng,maxLat
   fetchedAt: number;
 };
+
+/** 지하철 출입구 — 역을 목적지로 잡았을 때 실제로 들어가는 지점 */
+export type Entrance = { id: string; p: LngLat; name?: string };
 
 export type SafetyPoint = {
   id: string;

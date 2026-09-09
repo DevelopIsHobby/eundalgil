@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { useApp } from "./store";
 import { useDebounced } from "./useDebounced";
-import { fetchOsmBundles, type OsmBundle } from "./osm";
+import { fetchOsmBundles, type Entrance, type OsmBundle } from "./osm";
 import {
   bboxContains,
   bboxOfPoints,
@@ -111,6 +111,65 @@ function betterDeparture(
 
   if (best.atMs === fromMs || best.shade - now < LATER_GAIN) return null;
   return { atMs: best.atMs, shade: best.shade, nowShade: now };
+}
+
+/**
+ * 목적지가 지하철역이면 **실제로 들어가는 출입구**까지만 걸으면 된다.
+ *
+ * 검색이 주는 역 좌표는 승강장 한가운데나 도로 위의 한 점이라, 정류장에서 코앞인
+ * 출입구를 두고 역 중심까지 걷는 것으로 계산됐다. (봉천역: 실제 1분 거리를 3분으로 봤다)
+ * 이름이 "○○역" 이고 근처에 출입구가 있으면, 오는 방향에서 가장 가까운 출입구를
+ * 도착 지점으로 삼는다.
+ */
+const ENTRANCE_NEAR_M = 250;
+
+/**
+ * 출입구 이름 짓기. OSM 은 `ref=6` 처럼 번호만 두기도 하고
+ * `name=봉천역 6번 출구` 처럼 통째로 적어 두기도 한다.
+ */
+function entranceLabel(station: string, raw?: string) {
+  const v = raw?.trim();
+  if (!v) return `${station} 출입구`;
+  if (/^\d+$/.test(v)) return `${station} ${v}번 출구`;
+  return v.includes(station) ? v : `${station} ${v}`;
+}
+
+function stationArrival(
+  bundles: OsmBundle[],
+  destination: LngLat,
+  destName: string,
+  approach: LngLat,
+  walk: WalkFn
+): { p: LngLat; name: string } | null {
+  if (!/역$/.test(destName.trim())) return null;
+
+  const near: Entrance[] = [];
+  for (const b of bundles) {
+    for (const e of b.entrances ?? []) {
+      if (distMeters(e.p, destination) <= ENTRANCE_NEAR_M) near.push(e);
+    }
+  }
+  if (!near.length) return null;
+
+  /*
+   * 직선으로 가장 가까운 출구가 실제로도 가장 가까운 건 아니다.
+   * 봉천역 6번 출구는 정류장에서 직선 39m 인데, 그 옆 보도가 OSM 에 없어서
+   * 걸어서 재면 173m 가 나온다. 그럴 때는 조금 더 떨어져 있어도 길이 이어진
+   * 다른 출구가 낫다. 그래서 몇 곳을 **실제로 걸어 보고** 가장 빠른 곳을 고른다.
+   */
+  const tried = near
+    .map((e) => ({ e, d: distMeters(e.p, approach) }))
+    .sort((x, y) => x.d - y.d)
+    .slice(0, 5);
+
+  let best: { e: Entrance; sec: number } | null = null;
+  for (const { e } of tried) {
+    const r = walk(approach, e.p);
+    if (!r) continue;
+    if (!best || r.duration < best.sec) best = { e, sec: r.duration };
+  }
+  if (!best) return null;
+  return { p: best.e.p, name: entranceLabel(destName, best.e.name) };
 }
 
 /** 이만큼 안에 있는 환승 지점은 한 번만 받는다 */
@@ -285,6 +344,9 @@ export function useRouting() {
         ]);
         if (cancelled) return;
 
+        // 받아 온 번들 — 그늘·출입구를 찾을 때 여러 곳에서 쓴다
+        const loaded = bundles.filter((b): b is OsmBundle => !!b);
+
         let ctxs = bundles
           .filter((b): b is OsmBundle => !!b)
           .filter((b) => b.ways.length > 0)
@@ -424,7 +486,19 @@ export function useRouting() {
               if (kept >= MAX_TRANSIT_PLANS) break;
               const routeKey = cand.rides.map((r) => r.pattern.ref || r.pattern.name).join(">");
               if (shownRoutes.has(routeKey)) continue;
-              const base = { ...meta, origin: origin.p, destination: destination.p, arrivals };
+              /*
+               * 역이 목적지면 걷는 건 출입구까지다. 목적지 이름은 그대로 "○○역" 이지만,
+               * 역 중심(승강장 한가운데나 도로 위의 점)까지 걷는 것으로 재면 없는 시간이 붙는다.
+               */
+              const lastStop = cand.rides[cand.rides.length - 1].to.p;
+              const arrive = stationArrival(loaded, destination.p, destination.name, lastStop, shadeWalk);
+              const base = {
+                ...meta,
+                origin: origin.p,
+                destination: arrive?.p ?? destination.p,
+                destName: arrive?.name ?? destination.name,
+                arrivals,
+              };
               const shade = buildTransitPlan(cand, { ...base, style: "shade", walk: shadeWalk });
               const fast = buildTransitPlan(cand, { ...base, style: "fast", walk: fastWalk });
               // 정류장까지 걸어갈 길이 없는 조합은 버린다
@@ -468,7 +542,6 @@ export function useRouting() {
         const walkPaths = picked[0].shade.legs
           .filter((l) => l.type === "walk")
           .map((l) => (l as { route: RouteResult }).route.path);
-        const loaded = bundles.filter((b): b is OsmBundle => !!b);
         useApp
           .getState()
           .setDeparture(sun.isDay ? betterDeparture(loaded, walkPaths, timeMs, showTrees) : null);

@@ -9,7 +9,7 @@ import {
   type BBox,
   type LngLat,
 } from "@/lib/geo";
-import type { OsmBundle, RawBuilding, RawTree, SafetyPoint, WalkWay } from "@/lib/osm";
+import type { Entrance, OsmBundle, RawBuilding, RawTree, SafetyPoint, WalkWay } from "@/lib/osm";
 import { overpass, type OverpassElement } from "@/lib/overpass";
 import { readCachedBundle, writeCachedBundle } from "@/lib/osmCache";
 import { fetchVWorldBuildings, hasVWorldBuildings } from "@/lib/vworldBuildings";
@@ -66,6 +66,7 @@ function buildQuery(b: BBox, withBuildings: boolean) {
   way["highway"~"${WALK_HIGHWAY}"]["area"!~"yes"](${bb});
   way["natural"~"^(wood|scrub)$"](${bb});
   way["landuse"~"^(forest)$"](${bb});
+  node["railway"="subway_entrance"](${bb});
   node["highway"="street_lamp"](${bb});
   node["man_made"="surveillance"](${bb});
   node["emergency"="phone"](${bb});
@@ -148,6 +149,7 @@ function bundleOf(elements: OverpassElement[], box: BBox, woods: Wood[]): OsmBun
   const trees: RawTree[] = [];
   const ways: WalkWay[] = [];
   const safety: SafetyPoint[] = [];
+  const entrances: Entrance[] = [];
 
   const inWood = (p: LngLat) => woods.some((w) => bboxContains(w.bbox, p) && pointInRing(p, w.ring));
 
@@ -197,6 +199,8 @@ function bundleOf(elements: OverpassElement[], box: BBox, woods: Wood[]): OsmBun
         const h = parseFloat(tags.height ?? "") || 8;
         const crown = parseFloat(tags["diameter_crown"] ?? "") / 2 || 3;
         trees.push({ id: `n${el.id}`, p, height: h, crown: Math.max(1.5, crown) });
+      } else if (tags.railway === "subway_entrance") {
+        entrances.push({ id: `n${el.id}`, p, name: tags.name ?? tags.ref });
       } else if (tags.highway === "street_lamp") {
         safety.push({ id: `n${el.id}`, p, kind: "lamp" });
       } else if (tags.man_made === "surveillance") {
@@ -212,6 +216,7 @@ function bundleOf(elements: OverpassElement[], box: BBox, woods: Wood[]): OsmBun
     trees,
     ways,
     safety,
+    entrances,
     bbox: [box.minLng, box.minLat, box.maxLng, box.maxLat],
     fetchedAt: Date.now(),
   };
