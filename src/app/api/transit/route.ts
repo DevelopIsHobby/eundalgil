@@ -34,9 +34,24 @@ const STOP_SELECTORS = [
   'node["railway"~"^(station|halt|tram_stop)$"]',
 ];
 
+/** 출발·도착을 모두 감싸는 범위 — 타고 가는 구간의 선로를 이 안에서만 받는다 */
+function corridorBox(a: LngLat, b: LngLat, meters: number) {
+  const dLat = meters / EARTH_M_PER_DEG_LAT;
+  const dLng = meters / mPerDegLon((a[1] + b[1]) / 2);
+  const s = Math.min(a[1], b[1]) - dLat;
+  const w = Math.min(a[0], b[0]) - dLng;
+  const n = Math.max(a[1], b[1]) + dLat;
+  const e = Math.max(a[0], b[0]) + dLng;
+  return `${s.toFixed(6)},${w.toFixed(6)},${n.toFixed(6)},${e.toFixed(6)}`;
+}
+
 /**
  * 출발지·목적지 주변의 정류장을 먼저 찾고, 그 정류장을 지나는 노선 관계만 받아 온다.
  * 노선에 속한 나머지 정류장 좌표는 `node(r)` 재귀로 한 번에 따라온다.
+ *
+ * 마지막으로 그 노선의 **선로**를 출발·도착 사이 범위에서만 좌표까지 받는다.
+ * 지하철이 지하로 가는지 지상으로 가는지는 선로의 tunnel 태그에만 적혀 있고
+ * (역 노드에는 없다), 노선 전체를 받으면 응답이 지나치게 커진다.
  */
 function buildQuery(a: LngLat, b: LngLat, radius: number) {
   const boxA = bboxAround(a, radius);
@@ -52,7 +67,58 @@ function buildQuery(a: LngLat, b: LngLat, radius: number) {
 rel(bn.s)["type"="route"]["route"~"^(bus|subway|light_rail|tram|train|monorail|trolleybus)$"]->.r;
 .r out body qt;
 node(r.r)->.rn;
-.rn out body qt;`;
+.rn out body qt;
+way(r.r)(${corridorBox(a, b, radius)});
+out geom;`;
+}
+
+/** 노선이 지나는 선로 한 토막 */
+type TrackWay = { tunnel: boolean; geometry: LngLat[] };
+
+/** 점과 선분 사이 거리(m) — 몇 km 안에서 쓰는 값이라 평면 근사로 충분하다 */
+function distToSegment(p: LngLat, a: LngLat, b: LngLat) {
+  const kx = mPerDegLon((a[1] + b[1]) / 2);
+  const px = (p[0] - a[0]) * kx;
+  const py = (p[1] - a[1]) * EARTH_M_PER_DEG_LAT;
+  const bx = (b[0] - a[0]) * kx;
+  const by = (b[1] - a[1]) * EARTH_M_PER_DEG_LAT;
+  const len2 = bx * bx + by * by;
+  const t = len2 > 0 ? Math.max(0, Math.min(1, (px * bx + py * by) / len2)) : 0;
+  return Math.hypot(px - bx * t, py - by * t);
+}
+
+/** 이보다 멀면 그 자리의 선로가 응답에 없는 것으로 본다 */
+const TRACK_MATCH_M = 150;
+/** 정류장 사이 한 구간을 판단할 때 찍어 보는 지점 수 */
+const HOP_SAMPLES = 5;
+
+/**
+ * 정류장 사이 한 구간이 지상으로 달리는 비율(0~1).
+ * 선로를 못 찾으면 null — "지하가 아니다" 가 아니라 "모른다" 이다.
+ */
+function hopSurfaceRatio(from: LngLat, to: LngLat, tracks: TrackWay[]): number | null {
+  let surface = 0;
+  let tunnel = 0;
+  for (let s = 0; s < HOP_SAMPLES; s++) {
+    const t = (s + 0.5) / HOP_SAMPLES;
+    const p: LngLat = [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t];
+    let bestD = TRACK_MATCH_M;
+    let best: TrackWay | null = null;
+    for (const w of tracks) {
+      for (let i = 1; i < w.geometry.length; i++) {
+        const d = distToSegment(p, w.geometry[i - 1], w.geometry[i]);
+        if (d < bestD) {
+          bestD = d;
+          best = w;
+        }
+      }
+    }
+    if (!best) continue;
+    if (best.tunnel) tunnel++;
+    else surface++;
+  }
+  const seen = surface + tunnel;
+  return seen ? surface / seen : null;
 }
 
 function modeOf(route: string | undefined): TransitMode | null {
@@ -139,9 +205,19 @@ export async function GET(req: NextRequest) {
 
   const nodes = new Map<number, OverpassElement>();
   const relations: OverpassElement[] = [];
+  const tracks = new Map<number, TrackWay>();
   for (const el of elements) {
     if (el.type === "node" && el.lat != null && el.lon != null) nodes.set(el.id, el);
     else if (el.type === "relation") relations.push(el);
+    else if (el.type === "way" && el.geometry?.length) {
+      const t = el.tags ?? {};
+      // covered 는 지붕만 덮은 경우지만 햇빛이 안 드는 건 터널과 같다
+      const tunnel = (!!t.tunnel && t.tunnel !== "no") || (!!t.covered && t.covered !== "no");
+      tracks.set(el.id, {
+        tunnel,
+        geometry: el.geometry.map((g) => [g.lon, g.lat] as LngLat),
+      });
+    }
   }
 
   /**
@@ -197,6 +273,20 @@ export async function GET(req: NextRequest) {
     if (ordered.length < 2) continue;
     if (!looksOrdered(ordered.map((id) => stops.get(id)!.p))) continue;
 
+    /*
+     * 정류장 사이 구간마다 지상으로 달리는 비율.
+     * 선로를 받아 온 범위(출발~도착) 밖의 구간은 null 이 되는데, 어차피 타지 않는 구간이다.
+     */
+    const routeTracks = rel.members
+      .filter((m) => m.type === "way")
+      .map((m) => tracks.get(m.ref))
+      .filter((w): w is TrackWay => !!w);
+    const aboveGround = routeTracks.length
+      ? ordered
+          .slice(1)
+          .map((id, i) => hopSurfaceRatio(stops.get(ordered[i])!.p, stops.get(id)!.p, routeTracks))
+      : undefined;
+
     patterns.push({
       id: `r${rel.id}`,
       ref: tags.ref ?? tags["ref:ko"] ?? "",
@@ -205,6 +295,7 @@ export async function GET(req: NextRequest) {
       colour: tags.colour ?? tags.color,
       headsign: tags.to,
       stops: ordered,
+      aboveGround,
     });
   }
 

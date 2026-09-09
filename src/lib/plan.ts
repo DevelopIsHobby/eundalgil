@@ -270,7 +270,7 @@ export function buildTransitPlan(
     legs.push({
       type: "ride",
       ride,
-      seat: seatAdvice(ride.path, boardMs, ride.rideSec),
+      seat: seatAdvice(ride.path, boardMs, ride.rideSec, ride.surface),
       arriveMs,
       startMs: boardMs,
       live: wait.live,

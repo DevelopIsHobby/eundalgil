@@ -43,6 +43,12 @@ export type TransitPattern = {
   stops: string[];
   /** 버스만 — 실시간 도착정보를 이 노선에 맞춰 붙일 때 쓴다 */
   live?: PatternLive;
+  /**
+   * 정류장 사이 구간마다 **지상으로 달리는 비율**(0~1). 길이는 stops.length - 1.
+   * null 은 "지상이다" 가 아니라 그 구간 선로 정보가 없다는 뜻이다.
+   * 지하 구간에는 햇빛이 들지 않으므로 자리 추천에서 빼야 한다.
+   */
+  aboveGround?: (number | null)[];
 };
 
 export type TransitData = {
@@ -234,6 +240,8 @@ export type RideSpec = {
   stopCount: number;
   /** 정류장을 이은 주행 경로 */
   path: LngLat[];
+  /** path 의 구간마다 지상으로 달리는 비율 — 길이는 path.length - 1 */
+  surface?: (number | null)[];
   distance: number;
   rideSec: number;
   waitSec: number;
@@ -265,12 +273,17 @@ function rideOf(
   if (!from || !to) return null;
 
   const path: LngLat[] = [];
+  const surface: (number | null)[] = [];
   let distance = 0;
   let prev: LngLat | null = null;
   for (let k = i; k <= j; k++) {
     const s = stopsById.get(pattern.stops[k]);
     if (!s) continue;
-    if (prev) distance += distMeters(prev, s.p);
+    if (prev) {
+      distance += distMeters(prev, s.p);
+      // aboveGround[k-1] 은 stops[k-1] → stops[k] 구간이다
+      surface.push(pattern.aboveGround?.[k - 1] ?? null);
+    }
     path.push(s.p);
     prev = s.p;
   }
@@ -282,6 +295,7 @@ function rideOf(
     to,
     stopCount: j - i,
     path,
+    surface,
     distance,
     rideSec: distance / MODE_SPEED[pattern.mode],
     waitSec: MODE_WAIT[pattern.mode],

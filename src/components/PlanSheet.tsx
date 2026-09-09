@@ -125,6 +125,8 @@ function RideLegRow({ leg }: { leg: RideLeg }) {
   const realtime = live && !live.fromHeadway ? live : null;
   /** 같은 구간을 함께 다니는 노선 중 실제로 먼저 오는 번호 */
   const firstRef = realtime?.ref;
+  /** 선로가 전부 지하라고 확인된 구간 — 햇빛이 없으니 자리를 고를 이유가 없다 */
+  const underground = seat.surfaceKnown && seat.surfaceRatio < 0.05;
   return (
     <li className="flex gap-3">
       <div className="flex w-11 shrink-0 flex-col items-center">
@@ -199,11 +201,18 @@ function RideLegRow({ leg }: { leg: RideLeg }) {
             <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[13px] font-bold">
               <IconSun className="h-4 w-4 shrink-0 text-sun" />
               <span className="whitespace-nowrap">
-                {seat.side === "any" ? "자리 상관없음" : `${SIDE_LABEL[seat.side]} 추천`}
+                {underground
+                  ? "자리 추천 없음"
+                  : seat.side === "any"
+                    ? "자리 상관없음"
+                    : `${SIDE_LABEL[seat.side]} 추천`}
               </span>
-              <span className="whitespace-nowrap rounded bg-brand-soft px-1.5 py-0.5 text-[12px] font-bold text-brand">
-                그늘 {Math.round(seat.shadeRatio * 100)}%
-              </span>
+              {/* 지하 구간의 "그늘 100%" 는 자리를 잘 골랐다는 말처럼 읽힌다. 해가 아예 없는 것이다 */}
+              {!underground && (
+                <span className="whitespace-nowrap rounded bg-brand-soft px-1.5 py-0.5 text-[12px] font-bold text-brand">
+                  그늘 {Math.round(seat.shadeRatio * 100)}%
+                </span>
+              )}
             </p>
             <p className="mt-1 text-[12px] leading-relaxed text-ink-500">{seat.reason}</p>
             {seat.side !== "any" && (
@@ -211,14 +220,24 @@ function RideLegRow({ leg }: { leg: RideLeg }) {
                 반대쪽은 그늘 {Math.round(seat.otherShadeRatio * 100)}%
               </p>
             )}
-            {ride.pattern.mode !== "bus" && (
-              // 해 위치로만 계산하므로 터널·지하 구간에서는 의미가 없다
-              <p className="mt-0.5 text-[12px] text-ink-400">지상 구간 기준이에요.</p>
-            )}
+            {/*
+              해 위치로만 계산하므로 지하 구간에서는 의미가 없다.
+              전 구간 지하면 seat.reason 이 이미 그렇게 말하고, 전 구간 지상이면 굳이 적지 않는다.
+            */}
+            {ride.pattern.mode !== "bus" &&
+              (!seat.surfaceKnown ? (
+                <p className="mt-0.5 text-[12px] text-ink-400">지상 구간 기준이에요.</p>
+              ) : seat.surfaceRatio >= 0.05 && seat.surfaceRatio < 0.95 ? (
+                <p className="mt-0.5 text-[12px] text-ink-400">
+                  지상 구간 {Math.round(seat.surfaceRatio * 100)}% 기준이에요.
+                </p>
+              ) : null)}
           </div>
-          <span className="shrink-0">
-            <SeatDiagram highlight={seat.side} compact />
-          </span>
+          {!underground && (
+            <span className="shrink-0">
+              <SeatDiagram highlight={seat.side} compact />
+            </span>
+          )}
         </div>
 
         <p className="mt-2 text-[13px] text-ink-500 tabular-nums">
