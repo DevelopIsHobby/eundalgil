@@ -302,7 +302,14 @@ export function useRouting() {
         if (!transit) return null;
         // 지도에 주변 정류장을 뿌리는 데 쓴다 (노선 계산과는 별개다)
         if (!cancelled) useApp.getState().setTransitStops(transit.stops);
-        const rough = planTransit(transit, origin.p, destination.p, TRANSIT_CANDIDATES);
+        const rough = planTransit(
+          transit,
+          origin.p,
+          destination.p,
+          TRANSIT_CANDIDATES,
+          false,
+          weights.speedMps
+        );
         if (!rough.length) return { rough, shapes: [], extra: [], live: null };
 
         const used = new Map<string, TransitPattern>();
@@ -452,7 +459,8 @@ export function useRouting() {
               origin.p,
               destination.p,
               TRANSIT_CANDIDATES,
-              true
+              true,
+              weights.speedMps
             );
 
             if (!candidates.length) {

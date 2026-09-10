@@ -132,9 +132,17 @@ const MAX_ACCESS_PER_MODE = 12;
 const ALWAYS_NEAREST = 2;
 /** 환승 도보로 인정하는 최대 직선거리(m) */
 export const TRANSFER_RADIUS_M = 260;
-/** 도보 추정용 — 직선거리에 곱하는 우회 계수 */
-const WALK_DETOUR = 1.3;
-const WALK_MPS = 1.25;
+/**
+ * 도보 추정용 — 직선거리에 곱하는 우회 계수.
+ *
+ * 후보를 고를 때는 걷는 길을 실제로 계산하지 않고 직선거리로 어림한다. 그 값이 낮으면
+ * **많이 걷는 안이 실제보다 좋아 보여** 좋은 안을 밀어낸다. 상도동 → 대치동에서
+ * 추정 54분짜리가 계산 뒤엔 61분이 되던 게 그래서였다.
+ *
+ * 실측(상도·중앙대·광화문·잠실 구간 도보 16개)으로 다시 잡았다 —
+ * 직선 대비 실제 거리가 중앙값 1.43, 4분위 1.39~1.64 였다. 1.3 은 너무 낮았다.
+ */
+const WALK_DETOUR = 1.45;
 /** 환승 한 번에 붙이는 심리적 비용(초) */
 const TRANSFER_PENALTY_S = 180;
 /** 첫 구간이 이보다 오래 걸리면 환승 후보로 두지 않는다 */
@@ -308,7 +316,8 @@ export type TransitCandidate = {
   estimateSec: number;
 };
 
-const walkSec = (meters: number) => (meters * WALK_DETOUR) / WALK_MPS;
+/** 걷는 속도는 취향에 따라 다르다. 추정도 그 속도로 해야 순위가 맞는다 */
+const walkSecAt = (speedMps: number) => (meters: number) => (meters * WALK_DETOUR) / speedMps;
 
 /**
  * 길 좌표가 없을 때 쓰는 어림 구간 — 정류장을 곧장 이은 것이다.
@@ -411,8 +420,11 @@ export function planTransit(
   destination: LngLat,
   limit = 4,
   /** 길 좌표가 있는 구간만 인정할지 — 화면에 올릴 계산은 true */
-  needShape = false
+  needShape = false,
+  /** 걷는 속도(m/s) — 취향 설정을 그대로 받는다 */
+  speedMps = 1.25
 ): TransitCandidate[] {
+  const walkSec = walkSecAt(speedMps);
   const stopsById = new Map(data.stops.map((s) => [s.id, s]));
   const boardings = new Map<string, Boarding[]>();
   for (const pattern of data.patterns) {
