@@ -274,9 +274,26 @@ async function vworldOnce(
     .filter((h): h is PlaceHit => h !== null);
 }
 
-async function vworld(q: string, origin: string, signal: AbortSignal): Promise<PlaceHit[] | null> {
+/**
+ * 브이월드가 왜 답을 못 줬는지. 배포판에서 이걸 화면까지 올려 보낸다.
+ *
+ * 서버 로그에만 남기던 시절에는, 키를 넣었는데도 주소가 안 나올 때 **원인을 볼 방법이
+ * 없었다.** 로컬에서는 되고 배포판에서만 안 되는 상황이라 더 그랬다 (키를 안 넣었는지,
+ * 재배포를 안 했는지, 브이월드가 거절했는지 구분이 안 된다). 그래서 사유를 들고 올라간다.
+ */
+export type VWorldFailure = "no-key" | string;
+
+async function vworld(
+  q: string,
+  origin: string,
+  signal: AbortSignal,
+  report?: (why: VWorldFailure) => void
+): Promise<PlaceHit[] | null> {
   const key = envValue("VWORLD_KEY", "NEXT_PUBLIC_VWORLD_KEY");
-  if (!key) return null;
+  if (!key) {
+    report?.("no-key");
+    return null;
+  }
   // 보통은 앱이 떠 있는 주소가 곧 브이월드에 등록한 도메인이다
   const referer = envValue("VWORLD_REFERER") || origin;
 
@@ -285,8 +302,12 @@ async function vworld(q: string, origin: string, signal: AbortSignal): Promise<P
     vworldOnce(q, "PLACE", key, referer, signal),
   ]);
   for (const s of settled) {
-    // 키가 틀리면 조용히 빈 결과가 되는 대신 서버 로그에 남긴다
-    if (s.status === "rejected") console.warn("[search] vworld:", (s.reason as Error)?.message);
+    // 키가 틀리면 조용히 빈 결과가 되는 대신 서버 로그에 남기고, 화면에도 올려 보낸다
+    if (s.status === "rejected") {
+      const why = (s.reason as Error)?.message || "알 수 없는 오류";
+      console.warn("[search] vworld:", why);
+      report?.(why);
+    }
   }
   const ok = settled.filter((s) => s.status === "fulfilled").map((s) => s.value);
   // 주소와 장소를 번갈아 넣는다. 한쪽이 5건씩 쏟아져 다른 쪽을 덮지 않게 하려는 것이다
@@ -482,12 +503,18 @@ function preferStations(q: string, hits: PlaceHit[], bias: Bias) {
  *   - Nominatim — 주소를 정확히 적었을 때 잘 맞는다
  *   - Photon   — 상호·부분 입력에 강한 대신 엉뚱한 동네도 물어 온다
  */
-async function search(q: string, bias: Bias, origin: string, signal: AbortSignal): Promise<PlaceHit[]> {
+async function search(
+  q: string,
+  bias: Bias,
+  origin: string,
+  signal: AbortSignal,
+  report?: (why: VWorldFailure) => void
+): Promise<PlaceHit[]> {
   const isStation = /역$/.test(q.trim());
   const settled = await Promise.allSettled([
     // "○○역" 이면 "역" 을 뗀 이름으로 물은 지하철역을 맨 앞에 세운다
     isStation ? stationsByStem(q, bias, signal) : Promise.resolve<PlaceHit[]>([]),
-    vworld(q, origin, signal),
+    vworld(q, origin, signal, report),
     nominatim(q, bias, signal),
     photon(q, bias, signal),
   ]);
@@ -537,16 +564,31 @@ export async function GET(req: NextRequest) {
   const hasHouseNo = (hits: PlaceHit[]) =>
     !houseNo || hits.some((h) => `${h.name}${h.address}`.replace(/\s/g, "").includes(houseNo));
 
+  /** 브이월드가 거절한 사유. 이번 요청에서만 쓴다 */
+  let vworldWhy: VWorldFailure | undefined;
+  const report = (why: VWorldFailure) => {
+    vworldWhy ??= why;
+  };
+
+  /**
+   * 키는 넣었는데 브이월드가 거절했을 때, 그 사유를 그대로 보여 준다.
+   * "왜 로컬에서는 되는데 배포판에서는 안 되지" 를 화면만 보고 가릴 수 있어야 한다.
+   */
+  const vworldNotice = () =>
+    vworldWhy && vworldWhy !== "no-key"
+      ? `국내 주소 DB(브이월드)가 답하지 않았어요 — ${vworldWhy}`
+      : undefined;
+
   const answer = (hits: PlaceHit[]) => {
     const shown = roadToken ? matchesRoad(hits, roadToken) : hits;
     let notice: string | undefined;
     if (!shown.length && roadToken) {
       notice = hasKoreanDb
-        ? `"${roadToken}" 이 들어간 주소를 찾지 못했어요. 도로명을 다시 확인해 주세요.`
+        ? (vworldNotice() ?? `"${roadToken}" 이 들어간 주소를 찾지 못했어요. 도로명을 다시 확인해 주세요.`)
         : NO_KOREAN_DB;
     } else if (!hasHouseNo(shown)) {
       notice = hasKoreanDb
-        ? `"${roadToken} ${houseNo}" 번지를 찾지 못했어요. 길만 찾은 결과입니다.`
+        ? (vworldNotice() ?? `"${roadToken} ${houseNo}" 번지를 찾지 못했어요. 길만 찾은 결과입니다.`)
         : NO_KOREAN_DB;
     }
     return NextResponse.json({ hits: shown, notice });
@@ -560,7 +602,7 @@ export async function GET(req: NextRequest) {
   try {
     const ask = async (term: string) =>
       (await naverLocal(term, ctl.signal)) ??
-      (await search(term, bias, req.nextUrl.origin, ctl.signal));
+      (await search(term, bias, req.nextUrl.origin, ctl.signal, report));
 
     let hits = await ask(q);
 
