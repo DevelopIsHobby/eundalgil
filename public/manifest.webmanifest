@@ -3,11 +3,17 @@
   "short_name": "응달길",
   "description": "햇빛과 그늘을 계산해 걷기 좋은 길을 찾아주는 보행 지도",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "orientation": "portrait",
   "background_color": "#EDF0F3",
   "theme_color": "#0FA958",
   "lang": "ko",
+  "categories": ["navigation", "travel", "health"],
   "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
     { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
   ]
 }
