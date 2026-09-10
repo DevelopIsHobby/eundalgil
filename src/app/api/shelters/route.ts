@@ -67,7 +67,7 @@ async function allRows(): Promise<Row[]> {
   if (inflight) return inflight;
 
   const key = seoulKey();
-  if (!key) throw new Error("서울 열린데이터광장 키가 없습니다 (.env.local 의 SEOUL_OPENAPI_KEY)");
+  if (!key) throw new Error("서울 열린데이터광장 키가 없습니다 (환경 변수 SEOUL_OPENAPI_KEY)");
 
   inflight = (async () => {
     const rows: Row[] = [];

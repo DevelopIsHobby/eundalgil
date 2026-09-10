@@ -391,7 +391,10 @@ async function build(
       busNotice ??= msg;
     }
   }
-  if (!sources.length) busNotice = "버스 정보 키가 없어 지하철만 안내합니다. (.env.local 의 TAGO_KEY)";
+  if (!sources.length) {
+    // 배포판에는 .env.local 이 없다 (Vercel 은 프로젝트 환경 변수로 넣는다). 파일 이름은 빼고 변수 이름만 알린다
+    busNotice = "버스 정보 키가 없어 지하철만 안내합니다. (환경 변수 TAGO_KEY · 서울은 SEOUL_BUS_KEY)";
+  }
 
   /*
    * 이 구간에서 탈 수 있는 노선만 남긴다.

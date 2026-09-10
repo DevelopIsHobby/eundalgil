@@ -30,7 +30,7 @@ function snap(b: BBox): BBox {
 
 export async function GET(req: NextRequest) {
   if (!hasVWorldBuildings())
-    return new NextResponse("브이월드 키가 없습니다 (.env.local 의 VWORLD_KEY)", { status: 503 });
+    return new NextResponse("브이월드 키가 없습니다 (환경 변수 VWORLD_KEY)", { status: 503 });
 
   const raw = req.nextUrl.searchParams.get("bbox");
   if (!raw) return new NextResponse("bbox 파라미터가 필요합니다", { status: 400 });
