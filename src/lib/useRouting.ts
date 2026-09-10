@@ -41,7 +41,15 @@ import {
 } from "./transit";
 
 /** 도보 단독 경로 상한 — 이보다 멀면 받아야 할 데이터가 급격히 커진다 */
-const MAX_WALK_M = 5000;
+const MAX_WALK_M = 10000;
+/**
+ * 도보용 지도를 받을 때 직선 양옆으로 두는 여유(m).
+ *
+ * 예전에는 직선거리의 45% 를 줬는데, 10km 구간이면 한 변이 19km 인 네모가 된다.
+ * 걷는 길이 직선에서 그만큼 벗어나는 일은 없다 — 도시에서는 1km 안쪽이다.
+ * 짧은 구간에는 비례해 주고, 길어지면 뚜껑을 씌운다.
+ */
+const walkPad = (straight: number) => Math.min(1500, Math.max(400, straight * 0.45));
 /**
  * 대중교통까지 포함한 안내 상한.
  *
@@ -308,7 +316,7 @@ export function useRouting() {
       /* 받아야 할 OSM 범위 — 도보용 한 덩어리, 먼 구간이면 양 끝을 따로 */
       const rects: BBox[] = [];
       if (wantWalk || singleBundle) {
-        rects.push(padBBox(bboxOfPoints([origin.p, destination.p]), Math.max(400, straight * 0.45)));
+        rects.push(padBBox(bboxOfPoints([origin.p, destination.p]), walkPad(straight)));
       }
       if (!singleBundle && wantTransit) {
         for (const p of [origin.p, destination.p]) rects.push(padBBox(bboxOfPoints([p]), ENDPOINT_PAD_M));

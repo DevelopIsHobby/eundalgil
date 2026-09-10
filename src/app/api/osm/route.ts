@@ -19,9 +19,21 @@ import { loadElevation, smoothProfile } from "@/lib/elevation";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** bbox 한 변의 최대 길이(도). 약 3km 정도로 제한해 Overpass 과부하를 막는다. */
-const MAX_SPAN_LAT = 0.028;
-const MAX_SPAN_LNG = 0.035;
+/**
+ * bbox 한 변의 최대 길이(도).
+ *
+ * 3km 로 묶어 두던 시절에는 이 범위를 그대로 Overpass 에 물었기 때문이다. 지금은
+ * 미리 받아 둔 타일을 합쳐 줄 뿐이라, 넓어지면 합칠 타일이 몇 장 늘 뿐이다.
+ *
+ * 그런데 이 상한이 **도보 단독 안을 조용히 망가뜨리고 있었다.** 도보용 지도는 직선
+ * 양옆으로 여유를 두고 받는데, 그 네모가 3km 를 넘으면 가운데만 남기고 잘려서
+ * 출발지·도착지가 범위 밖으로 나갔다. 그래서 도보 안은 1.6km 까지만 나왔다 —
+ * MAX_WALK_M 은 5km 라고 적혀 있는데도.
+ *
+ * 산책까지 감당하도록 12km 쯤으로 연다 (10km 도보의 네모가 들어간다).
+ */
+const MAX_SPAN_LAT = 0.11;
+const MAX_SPAN_LNG = 0.13;
 
 
 
