@@ -12,6 +12,8 @@ import { fetchVWorldBuildings, hasVWorldBuildings } from "@/lib/vworldBuildings"
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/** 국내 공공 API 는 해외 IP 에서 끊긴다 — 함수를 서울에서 돌린다 (README "왜 서울 리전인가") */
+export const preferredRegion = ["icn1"];
 
 /** 한 번에 받을 수 있는 범위 상한 — 이보다 넓으면 건물이 수만 동이 된다 */
 const MAX_SPAN_LAT = 0.05;

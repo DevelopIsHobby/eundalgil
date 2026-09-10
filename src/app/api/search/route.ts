@@ -3,6 +3,17 @@ import { envValue } from "@/lib/env";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/**
+ * 이 창구들은 **서울(icn1)에서 돌려야 한다.**
+ *
+ * 브이월드·TOPIS·공공데이터포털은 국내에서 부르는 걸 전제로 열려 있다. Vercel 이 함수를
+ * 미국(iad1)에 올려 두자 브이월드가 502 로 끊었다 — 주소 검색도, 그늘의 원천인 건물도
+ * 통째로 죽었는데 화면에는 그저 "결과가 적다" 로만 보였다. 요청이 서울 엣지로 들어오는
+ * 것과 함수가 어디서 도는지는 별개다: `X-Vercel-Id` 가 `icn1::iad1::` 이면 그 경우다.
+ *
+ * 한곳만 고치면 안 된다. 창구마다 따로 적어야 Next 가 읽는다.
+ */
+export const preferredRegion = ["icn1"];
 
 export type PlaceHit = {
   id: string;

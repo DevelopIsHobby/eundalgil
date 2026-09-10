@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/** 국내 공공 API 는 해외 IP 에서 끊긴다 — 함수를 서울에서 돌린다 (README "왜 서울 리전인가") */
+export const preferredRegion = ["icn1"];
 
 /**
  * 현재 기온·하늘 상태. Open-Meteo 는 키 없이 쓸 수 있고 상업적 이용도 허용한다.

@@ -18,6 +18,8 @@ import { loadElevation, smoothProfile } from "@/lib/elevation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/** 국내 공공 API 는 해외 IP 에서 끊긴다 — 함수를 서울에서 돌린다 (README "왜 서울 리전인가") */
+export const preferredRegion = ["icn1"];
 
 /**
  * bbox 한 변의 최대 길이(도).

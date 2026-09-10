@@ -14,6 +14,8 @@ import { fetchTagoArrivals } from "@/lib/tago";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/** 국내 공공 API 는 해외 IP 에서 끊긴다 — 함수를 서울에서 돌린다 (README "왜 서울 리전인가") */
+export const preferredRegion = ["icn1"];
 
 /** 실시간이므로 아주 짧게만 묶어 둔다 (연달아 그리는 동안 같은 정류장을 두 번 묻지 않을 정도) */
 const CACHE_TTL_MS = 20 * 1000;
