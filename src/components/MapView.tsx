@@ -124,6 +124,13 @@ const ROUTE_LAYERS: LayerSpecification[] = [
   },
 ];
 
+/**
+ * 구간 사이의 틈을 이어 줄 최대 거리(m).
+ * 정류장과 도로 사이는 길어야 이 정도다. 이보다 멀면 잇지 않고 끊어진 채로 둔다 —
+ * 없는 길을 그리느니 끊긴 게 낫다.
+ */
+const STITCH_MAX_M = 150;
+
 type RouteProps = { role: "casing" | "seg" | "ride"; color: string; shady: number };
 type RouteFC = GeoJSON.FeatureCollection<GeoJSON.LineString, RouteProps>;
 
@@ -143,10 +150,25 @@ function buildPlanFC(plan: Plan | null): RouteFC {
     });
   };
 
-  for (const leg of plan.legs as Leg[]) {
+  const legs = plan.legs as Leg[];
+  const pathOf = (l: Leg) => (l.type === "walk" ? l.route.path : l.ride.path);
+
+  legs.forEach((leg, i) => {
     if (leg.type === "ride") {
-      line(leg.ride.path, { role: "ride", color: rideColorOf(leg), shady: 1 });
-      continue;
+      /*
+       * 정류장 표지판은 인도에 서 있고 노선 형상은 도로 한가운데를 지난다.
+       * 둘 사이가 10~50m 벌어지는데, 그대로 그리면 승차·하차 자리에서 경로가 끊겨 보이고
+       * 접합부에서는 도보선과 버스선이 나란히 지나가 두 줄처럼 읽힌다.
+       * 버스가 정류장으로 들어왔다 나가는 모양으로 이어 준다 — 실제로도 그렇게 다닌다.
+       */
+      const path = [...leg.ride.path];
+      const prev = i > 0 ? pathOf(legs[i - 1]).at(-1) : undefined;
+      const next = i + 1 < legs.length ? pathOf(legs[i + 1])[0] : undefined;
+      // 너무 멀면 잇지 않는다. 그건 이어 붙일 틈이 아니라 뭔가 잘못 맞춰진 것이다
+      if (prev && distMeters(prev, path[0]) <= STITCH_MAX_M) path.unshift(prev);
+      if (next && distMeters(next, path[path.length - 1]) <= STITCH_MAX_M) path.push(next);
+      line(path, { role: "ride", color: rideColorOf(leg), shady: 1 });
+      return;
     }
     line(leg.route.path, { role: "casing", color: "#FFFFFF", shady: 0 });
     for (const seg of leg.route.segments) {
@@ -157,7 +179,7 @@ function buildPlanFC(plan: Plan | null): RouteFC {
         shady: shady ? 1 : 0,
       });
     }
-  }
+  });
   return { type: "FeatureCollection", features };
 }
 
