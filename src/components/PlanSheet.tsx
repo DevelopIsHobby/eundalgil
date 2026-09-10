@@ -5,6 +5,7 @@ import { formatDistance, formatDuration } from "@/lib/router";
 import { formatClockKo, formatFare, type Leg, type Plan, type RideLeg, type WalkLeg } from "@/lib/plan";
 import { MODE_LABEL } from "@/lib/transit";
 import { SIDE_LABEL } from "@/lib/seat";
+import { weakCoolingCars } from "@/lib/weakCooling";
 import SeatDiagram from "./SeatDiagram";
 // 지도와 시트가 같은 색을 써야 한 여정으로 읽힌다
 import { rideColorOf as rideColor } from "./MapView";
@@ -252,6 +253,8 @@ function RideLegRow({ leg, seatKey }: { leg: RideLeg; seatKey: string }) {
   const firstRef = realtime?.ref;
   /** 선로가 전부 지하라고 확인된 구간 — 햇빛이 없으니 자리를 고를 이유가 없다 */
   const underground = seat.surfaceKnown && seat.surfaceRatio < 0.05;
+  /** 약냉방칸 — 지하철만, 그것도 아는 노선만 */
+  const cooling = ride.pattern.mode === "bus" ? null : weakCoolingCars(ride.pattern.ref);
   return (
     <li className="flex gap-3">
       <div className="flex w-11 shrink-0 flex-col items-center">
@@ -357,6 +360,19 @@ function RideLegRow({ leg, seatKey }: { leg: RideLeg; seatKey: string }) {
                   지상 구간 {Math.round(seat.surfaceRatio * 100)}% 기준이에요.
                 </p>
               ) : null)}
+
+            {/* 약냉방칸 — 여름에 지하철이 춥다는 사람이 많다. 아는 노선만 말한다 */}
+            {cooling &&
+              ("none" in cooling ? (
+                <p className="mt-0.5 text-[12px] text-ink-400">
+                  이 노선은 약냉방칸을 따로 두지 않아요.
+                </p>
+              ) : (
+                <p className="mt-0.5 text-[12px] text-ink-400">
+                  추우면 <b className="font-bold text-ink-700">{cooling.cars.join("·")}번째 칸</b>이
+                  약냉방칸이에요 (1℃ 높음).
+                </p>
+              ))}
           </div>
           {!underground && (
             <span className="shrink-0">
