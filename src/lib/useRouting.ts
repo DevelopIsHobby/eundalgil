@@ -61,7 +61,15 @@ const ENDPOINT_PAD_M = Math.round(SEARCH_RADIUS_M * 1.3);
  */
 const TRANSIT_CANDIDATES = 10;
 /** 그중 실제로 화면에 올릴 수 */
-const MAX_TRANSIT_PLANS = 4;
+const MAX_TRANSIT_PLANS = 6;
+/**
+ * 같은 노선으로 시작하는 안은 이만큼까지만 보여 준다.
+ *
+ * 상도동 → 대치동에서 네 칸 중 세 칸이 7호선 변형(7>2415 · 7>2416 · 7>강남08)으로
+ * 채워졌다. 첫 구간이 같으면 사용자에게는 거의 같은 안인데, 그 사이 정작 성격이 다른
+ * 안(500번 타고 봉천역에서 2호선)은 자리에 못 들었다.
+ */
+const MAX_PER_FIRST_LINE = 2;
 /** 환승 지점 언저리에서 따로 받아 오는 보행로 반경(m) — 환승 도보를 덮을 만큼만 */
 const HUB_PAD_M = 500;
 /** 출발 시각을 미뤄 볼 폭 — 30분 간격으로 세 시간까지 */
@@ -510,10 +518,14 @@ export function useRouting() {
              * 으로만 채워져, 정작 다른 노선 안이 밀려난다. 가장 빠른 것 하나만 남긴다.
              */
             const shownRoutes = new Set<string>();
+            /** 첫 구간 노선별로 몇 개나 보여 줬는지 */
+            const firstLineCount = new Map<string, number>();
             for (const cand of candidates) {
               if (kept >= MAX_TRANSIT_PLANS) break;
               const routeKey = cand.rides.map((r) => r.pattern.ref || r.pattern.name).join(">");
               if (shownRoutes.has(routeKey)) continue;
+              const firstLine = cand.rides[0]?.pattern.ref || cand.rides[0]?.pattern.name || "";
+              if ((firstLineCount.get(firstLine) ?? 0) >= MAX_PER_FIRST_LINE) continue;
               /*
                * 역이 목적지면 걷는 건 출입구까지다. 목적지 이름은 그대로 "○○역" 이지만,
                * 역 중심(승강장 한가운데나 도로 위의 점)까지 걷는 것으로 재면 없는 시간이 붙는다.
@@ -545,6 +557,7 @@ export function useRouting() {
               }
               pairs.push({ shade, fast });
               shownRoutes.add(routeKey);
+              firstLineCount.set(firstLine, (firstLineCount.get(firstLine) ?? 0) + 1);
               kept++;
             }
             if (dropped && !kept) {
@@ -563,7 +576,8 @@ export function useRouting() {
         }
 
         pairs.sort((a, b) => a.fast.seconds - b.fast.seconds);
-        const picked = pairs.slice(0, 4);
+        // 도보 단독 안이 섞이므로 한 칸 더 둔다
+        const picked = pairs.slice(0, MAX_TRANSIT_PLANS + 1);
         useApp.getState().setPlans(picked, null, notices);
 
         /* 이따 나가면 같은 길이 더 시원한지 — 경로가 정해진 다음에 따져 본다 */
