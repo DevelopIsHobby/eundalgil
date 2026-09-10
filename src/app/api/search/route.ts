@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { envValue } from "@/lib/env";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -274,10 +275,10 @@ async function vworldOnce(
 }
 
 async function vworld(q: string, origin: string, signal: AbortSignal): Promise<PlaceHit[] | null> {
-  const key = (process.env.VWORLD_KEY ?? process.env.NEXT_PUBLIC_VWORLD_KEY ?? "").trim();
+  const key = envValue("VWORLD_KEY", "NEXT_PUBLIC_VWORLD_KEY");
   if (!key) return null;
   // 보통은 앱이 떠 있는 주소가 곧 브이월드에 등록한 도메인이다
-  const referer = process.env.VWORLD_REFERER ?? origin;
+  const referer = envValue("VWORLD_REFERER") || origin;
 
   const settled = await Promise.allSettled([
     vworldOnce(q, "ADDRESS", key, referer, signal),
@@ -516,19 +517,38 @@ export async function GET(req: NextRequest) {
 
   /** 국내 주소·상호 DB 를 쓸 수 있는 상태인지 (없으면 OSM 만으로 찾는다) */
   const hasKoreanDb = !!(
-    (process.env.VWORLD_KEY ?? process.env.NEXT_PUBLIC_VWORLD_KEY ?? "").trim() ||
-    (process.env.NAVER_SEARCH_CLIENT_ID && process.env.NAVER_SEARCH_CLIENT_SECRET)
+    envValue("VWORLD_KEY", "NEXT_PUBLIC_VWORLD_KEY") ||
+    (envValue("NAVER_SEARCH_CLIENT_ID") && envValue("NAVER_SEARCH_CLIENT_SECRET"))
   );
   const roadToken = isAddressQuery(q) ? roadTokens(q)[0] : undefined;
 
+  const NO_KOREAN_DB =
+    "국내 도로명주소·건물명은 OpenStreetMap 에 거의 없습니다. 환경 변수에 브이월드 키(VWORLD_KEY)를 넣으면 찾을 수 있어요.";
+
+  /**
+   * 번지를 쳤는데 번지가 붙은 답이 하나도 없으면 알려 준다.
+   *
+   * 예전에는 결과가 **하나도 없을 때만** 안내를 띄웠다. 그런데 "양녕로 22라길 56" 을 치면
+   * OSM 이 번지 없는 길 자체("양녕로22라길")를 한 줄 주기 때문에, 정작 56번지를 못 찾았는데도
+   * 결과가 있다고 보고 조용히 넘어갔다. 배포판에 키를 안 넣은 걸 모르고 "갑자기 주소가
+   * 안 나온다" 고 느끼게 되는 자리다.
+   */
+  const houseNo = roadToken ? buildingNumber(q) : "";
+  const hasHouseNo = (hits: PlaceHit[]) =>
+    !houseNo || hits.some((h) => `${h.name}${h.address}`.replace(/\s/g, "").includes(houseNo));
+
   const answer = (hits: PlaceHit[]) => {
     const shown = roadToken ? matchesRoad(hits, roadToken) : hits;
-    const notice =
-      shown.length || !roadToken
-        ? undefined
-        : hasKoreanDb
-          ? `"${roadToken}" 이 들어간 주소를 찾지 못했어요. 도로명을 다시 확인해 주세요.`
-          : "국내 도로명주소·건물명은 OpenStreetMap 에 거의 없습니다. 환경 변수에 브이월드 키(VWORLD_KEY)를 넣으면 찾을 수 있어요.";
+    let notice: string | undefined;
+    if (!shown.length && roadToken) {
+      notice = hasKoreanDb
+        ? `"${roadToken}" 이 들어간 주소를 찾지 못했어요. 도로명을 다시 확인해 주세요.`
+        : NO_KOREAN_DB;
+    } else if (!hasHouseNo(shown)) {
+      notice = hasKoreanDb
+        ? `"${roadToken} ${houseNo}" 번지를 찾지 못했어요. 길만 찾은 결과입니다.`
+        : NO_KOREAN_DB;
+    }
     return NextResponse.json({ hits: shown, notice });
   };
 

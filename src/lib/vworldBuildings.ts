@@ -16,6 +16,7 @@ import type { BBox } from "./geo";
 import type { RawBuilding } from "./osm";
 import { DEFAULT_HEIGHT, FLOOR_HEIGHT } from "./shadow";
 import { readJson, writeJson } from "./diskCache";
+import { envValue } from "./env";
 
 const ENDPOINT = "https://api.vworld.kr/req/data";
 const LAYER = "LT_C_SPBD";
@@ -31,7 +32,7 @@ const TIMEOUT_MS = 12000;
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function vworldKey() {
-  return (process.env.VWORLD_KEY ?? process.env.NEXT_PUBLIC_VWORLD_KEY ?? "").trim();
+  return envValue("VWORLD_KEY", "NEXT_PUBLIC_VWORLD_KEY");
 }
 
 export function hasVWorldBuildings() {

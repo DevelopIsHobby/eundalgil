@@ -11,6 +11,7 @@
  *   3) busRouteInfo/getStaionByRoute — 노선이 지나는 정류소 순서
  */
 
+import { envValue } from "./env";
 import { distMeters, type LngLat } from "./geo";
 import { readJson, writeJson } from "./diskCache";
 import { shapeAlong } from "./shape";
@@ -34,8 +35,7 @@ const MAX_STOPS_PER_END = 12;
 export function seoulKey() {
   // `??` 로 이으면 SEOUL_BUS_KEY 가 **빈 문자열**일 때 TAGO 키로 넘어가지 않는다.
   // .env 에 이름만 적어 둔 경우가 그래서, 값이 비었으면 없는 것으로 친다.
-  const own = (process.env.SEOUL_BUS_KEY ?? "").trim();
-  return own || (process.env.TAGO_KEY ?? "").trim();
+  return envValue("SEOUL_BUS_KEY", "TAGO_KEY");
 }
 
 type Cached<T> = { at: number; value: T };
