@@ -140,7 +140,7 @@ const TRANSFER_PENALTY_S = 180;
 /** 첫 구간이 이보다 오래 걸리면 환승 후보로 두지 않는다 */
 const MAX_FIRST_LEG_S = 55 * 60;
 /** 환승 지점 후보 수 상한 — 빠른 순으로 자른다 */
-const MAX_TRANSFER_HUBS = 40;
+const MAX_TRANSFER_HUBS = 160;
 /**
  * 이보다 짧은 승차 구간은 만들지 않는다.
  * 한두 정류장을 위해 기다렸다 타는 안내는 실제로는 걷느니만 못하다.
@@ -153,6 +153,8 @@ const MIN_RIDE_M = 450;
  */
 const MIN_PROGRESS_RATIO = 0.35;
 const MIN_PROGRESS_M = 250;
+/** 갈아타러 가는 첫 구간이 목적지에서 멀어져도 되는 한도 — 전체 직선거리 대비 */
+const BACKTRACK_RATIO = 0.15;
 /**
  * 접근·하차 도보 합의 상한 — 여기 걸리면 후보로 만들지도 않는다.
  *
@@ -506,7 +508,17 @@ export function planTransit(
    * 실제 노선망에서 흔한 환승(한 번 지나쳤다가 다른 노선으로 되돌아오는 경우)을 놓친다.
    * 그래서 지리 대신 **시간**으로 자른다 — 여기까지 오는 데 오래 걸린 정류장부터 버린다.
    */
-  type Reach = { ride: RideSpec; accessMeters: number; cost: number };
+  /**
+   * 환승 지점 점수 — 여기까지 온 시간 + 남은 거리를 가장 빠른 수단으로 갔을 때의 시간.
+   *
+   * 여기까지의 시간만으로 줄을 세우면 가까운 정류장이 후보 자리를 다 차지한다.
+   * 그러면 조금 돌아가더라도 빠른 노선을 탈 수 있는 지점(상도동 → 대치동의 봉천역)이
+   * 밀려난다. 남은 거리를 함께 보면 "여기서 갈아타면 결국 빨리 도착하는가" 로 줄이 선다.
+   */
+  const hubScore = (cost: number, hub: TransitStop) =>
+    cost + distMeters(hub.p, destination) / MODE_SPEED.subway;
+
+  type Reach = { ride: RideSpec; accessMeters: number; cost: number; score: number };
   const reachAll = new Map<string, Reach>();
   for (const { board, accessMeters } of seeds) {
     const { pattern, index } = board;
@@ -515,16 +527,27 @@ export function planTransit(
       if (!stop) continue;
       const ride = rideOf(pattern, stopsById, index, j, needShape);
       if (!ride) continue;
-      // 첫 구간도 목적지 쪽으로 가야 한다 (되돌아가는 환승은 여기서 걸러진다)
-      if (progressOf(ride) < MIN_PROGRESS_M) continue;
+      /*
+       * 갈아타러 가는 첫 구간은 목적지에서 멀어져도 된다.
+       *
+       * 상도동 → 대치동이 그렇다. 500번을 타고 **서쪽** 봉천역으로 가서 2호선으로
+       * 갈아타는 게 가장 빠른데(네이버도 그렇게 안내한다), 봉천역은 출발지보다 목적지에서
+       * 581m 더 멀다. "가까워져야 한다" 로 자르면 이 안이 통째로 사라진다.
+       * 빠른 노선을 타러 조금 돌아가는 건 실제 노선망에서 흔한 일이다.
+       *
+       * 다만 한없이 돌아가지는 못하게 전체 거리에 비례해 묶어 둔다. 엉터리 조합은
+       * 어차피 뒤에서 "타고 가서 가까워져야 한다"(worthRiding) 와 실제 소요 시간이 거른다.
+       */
+      if (progressOf(ride) < -straight * BACKTRACK_RATIO) continue;
       const cost = walkSec(accessMeters) + ride.waitSec + ride.rideSec;
       if (cost > MAX_FIRST_LEG_S) continue;
       const prev = reachAll.get(stop.id);
-      if (!prev || cost < prev.cost) reachAll.set(stop.id, { ride, accessMeters, cost });
+      if (!prev || cost < prev.cost)
+        reachAll.set(stop.id, { ride, accessMeters, cost, score: hubScore(cost, stop) });
     }
   }
   const reach = [...reachAll.entries()]
-    .sort((x, y) => x[1].cost - y[1].cost)
+    .sort((x, y) => x[1].score - y[1].score)
     .slice(0, MAX_TRANSFER_HUBS);
 
   for (const [stopId, first] of reach) {
