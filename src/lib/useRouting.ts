@@ -215,13 +215,33 @@ function contextOf(
  * 같은 안내가 나온다. 짧은 구간이라고 봐주지도 않는다. 길을 모르면 안 그린다.
  */
 function makeWalk(ctxs: Ctx[], weights: RouteWeights): WalkFn {
+  /*
+   * 같은 구간을 몇 번이고 다시 찾게 된다. 후보 여러 개가 같은 정류장에서 타고,
+   * 그늘·최단 두 벌을 따로 만들기 때문이다 — 출발지 → 상도4동약수맨션 하나만 해도
+   * 대여섯 번 다시 계산했다. 한 번 찾은 건 들고 있는다.
+   *
+   * 이 캐시는 이번 계산 동안만 산다 (그래프·시각이 바뀌면 makeWalk 자체를 새로 만든다).
+   */
+  const cache = new Map<string, RouteResult | null>();
+  const keyOf = (a: LngLat, b: LngLat) =>
+    `${a[0].toFixed(6)},${a[1].toFixed(6)}>${b[0].toFixed(6)},${b[1].toFixed(6)}`;
+
   return (a: LngLat, b: LngLat): RouteResult | null => {
+    const key = keyOf(a, b);
+    const hit = cache.get(key);
+    if (hit !== undefined) return hit;
+
+    let found: RouteResult | null = null;
     for (const c of ctxs) {
       if (!bboxContains(c.bbox, a) || !bboxContains(c.bbox, b)) continue;
       const r = routeBetween(c.graph, a, b, weights);
-      if (r) return r;
+      if (r) {
+        found = r;
+        break;
+      }
     }
-    return null;
+    cache.set(key, found);
+    return found;
   };
 }
 
