@@ -172,7 +172,14 @@ const BACKTRACK_RATIO = 0.15;
  * 노선을 타는** 멀쩡한 안(상도동에서 1.2km 걸어 상도역, 거기서 마을버스)을 잘라 냈다.
  * 그래서 계산량만 막을 만큼 느슨하게 둔다.
  */
-const walkBudget = (straight: number) => Math.max(1600, straight * 1.6);
+/**
+ * 정류장까지 걷는 거리 + 내려서 걷는 거리의 합에 두는 상한.
+ *
+ * 짧은 구간에서는 직선거리에 비례해 넉넉히 준다 — 좋은 노선을 타려고 10분쯤 걸어
+ * 나가는 건 사람들이 실제로 하는 선택이다. 다만 구간이 길어지면 이 비례가 무의미해진다.
+ * 20km 짜리 구간에 32km 를 걸어도 된다고 하는 셈이라, 위에 뚜껑을 씌운다.
+ */
+const walkBudget = (straight: number) => Math.min(3200, Math.max(1600, straight * 1.6));
 
 export async function fetchTransit(
   origin: LngLat,
