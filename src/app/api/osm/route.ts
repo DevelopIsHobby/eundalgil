@@ -11,7 +11,8 @@ import {
 } from "@/lib/geo";
 import type { Entrance, OsmBundle, RawBuilding, RawTree, SafetyPoint, WalkWay } from "@/lib/osm";
 import { overpass, type OverpassElement } from "@/lib/overpass";
-import { readCachedBundle, writeCachedBundle } from "@/lib/osmCache";
+import { readTile, writeTile } from "@/lib/tileStore";
+import { inSeoul, tileBBox, tileKey, tilesCovering, type Tile } from "@/lib/tiles";
 import { fetchVWorldBuildings, hasVWorldBuildings } from "@/lib/vworldBuildings";
 import { loadElevation, smoothProfile } from "@/lib/elevation";
 
@@ -22,19 +23,9 @@ export const dynamic = "force-dynamic";
 const MAX_SPAN_LAT = 0.028;
 const MAX_SPAN_LNG = 0.035;
 
-/**
- * 건물·길·가로수는 좀처럼 바뀌지 않는다. 반면 Overpass 는 느리고 자주 거절한다.
- * 그러니 오래 들고 있는 편이 낫다 — 같은 동네를 다시 찾을 때 즉시 답한다.
- */
-const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
-const CACHE_MAX = 32;
-const cache = new Map<string, { at: number; data: OsmBundle }>();
 
-/**
- * 요청 범위를 이 격자에 맞춰 넓힌다 (약 400m).
- * 출발지를 조금만 옮겨도 범위가 달라져 캐시가 통째로 빗나가던 것을 막는다.
- */
-const SNAP_DEG = 0.004;
+
+
 /** 한 번에 받을 범위 수 — 출발·도착·환승 두어 곳이면 충분하다 */
 const MAX_BOXES = 6;
 
@@ -222,19 +213,90 @@ function bundleOf(elements: OverpassElement[], box: BBox, woods: Wood[]): OsmBun
   };
 }
 
-/** 요청 범위를 격자에 맞춰 넓힌다 — 조금씩 다른 범위가 같은 캐시를 쓰게 된다 */
-function snap(b: BBox): BBox {
-  const f = (v: number, dir: -1 | 1) =>
-    (dir < 0 ? Math.floor(v / SNAP_DEG) : Math.ceil(v / SNAP_DEG)) * SNAP_DEG;
+/**
+ * 타일 하나를 갖춰 둔다 — 파일에 있으면 그걸 쓰고, 없으면 받아서 남긴다.
+ *
+ * 미리 받아 둔 서울이라면 여기서 파일만 읽고 끝난다. 공개 Overpass 를 부르는 건
+ * 아직 안 받아 둔 타일뿐이다 (개발 중이거나 미리받기를 돌리는 중).
+ */
+async function loadTile(t: Tile, referer: string): Promise<OsmBundle | null> {
+  const saved = await readTile(t);
+  if (saved) return saved;
+
+  const box = tileBBox(t);
+  let data: OsmBundle;
+  try {
+    /*
+     * 건물은 브이월드(정부 건물통합정보)에서 받는다 — 훨씬 빠르고 층수까지 있다.
+     * Overpass 에서 건물을 빼면 남은 질의도 그만큼 가벼워지므로, 둘을 동시에 부른다.
+     * 브이월드가 안 되면 그때 Overpass 로 건물까지 다시 받는다.
+     */
+    const useVWorld = hasVWorldBuildings();
+    const [elements, vwBuildings] = await Promise.all([
+      overpass(buildQuery(box, !useVWorld)),
+      useVWorld ? fetchVWorldBuildings(box, referer) : Promise.resolve(null),
+    ]);
+    data = bundleOf(elements, box, woodsOf(elements));
+    if (useVWorld) {
+      if (vwBuildings?.length) data.buildings = vwBuildings;
+      else {
+        console.warn("[osm] 브이월드 건물을 못 받아 OSM 으로 되돌아갑니다");
+        data.buildings = bundleOf(await overpass(buildQuery(box, true)), box, woodsOf(elements)).buildings;
+      }
+    }
+  } catch (err) {
+    console.warn("[osm]", tileKey(t), (err as Error).message);
+    return null;
+  }
+
+  // 보행로 좌표마다 고도를 붙인다. 타일에 함께 저장하므로 한 번만 계산한다
+  const elevation = await loadElevation([box.minLng, box.minLat, box.maxLng, box.maxLat]);
+  if (!elevation) console.warn("[osm] 고도 없이 저장합니다 — 언덕을 넘는 경로가 나올 수 있습니다");
+  else for (const w of data.ways) w.elev = smoothProfile(w.path.map(([lng, lat]) => elevation(lng, lat)));
+
+  // 길도 건물도 없으면 제대로 받은 게 아니다. 남겨 두면 두고두고 잘못 안내한다
+  if (!data.ways.length && !data.buildings.length) return null;
+  await writeTile(t, data);
+  return data;
+}
+
+/** 타일 몇 장을 요청한 범위 하나로 합친다 */
+function assemble(box: BBox, parts: OsmBundle[]): OsmBundle {
+  const ways: WalkWay[] = [];
+  const buildings: RawBuilding[] = [];
+  const trees: RawTree[] = [];
+  const safety: SafetyPoint[] = [];
+  const entrances: Entrance[] = [];
+  // 타일 경계에 걸친 길·건물은 양쪽 타일에 모두 들어 있다. id 로 한 번만 담는다
+  const seen = new Set<string>();
+  const once = <T extends { id: string }>(src: T[], into: T[], hit: (v: T) => boolean) => {
+    for (const v of src) {
+      if (seen.has(v.id) || !hit(v)) continue;
+      seen.add(v.id);
+      into.push(v);
+    }
+  };
+
+  for (const p of parts) {
+    once(p.ways, ways, (w) => bboxIntersects(box, bboxOfPoints(w.path)));
+    once(p.buildings, buildings, (b) => bboxIntersects(box, bboxOfPoints(b.ring)));
+    once(p.trees, trees, (v) => bboxContains(box, v.p));
+    once(p.safety, safety, (v) => bboxContains(box, v.p));
+    once(p.entrances, entrances, (v) => bboxContains(box, v.p));
+  }
+
   return {
-    minLng: f(b.minLng, -1),
-    minLat: f(b.minLat, -1),
-    maxLng: f(b.maxLng, 1),
-    maxLat: f(b.maxLat, 1),
+    ways,
+    buildings,
+    trees,
+    safety,
+    entrances,
+    bbox: [box.minLng, box.minLat, box.maxLng, box.maxLat],
+    fetchedAt: Date.now(),
   };
 }
 
-/** 너무 넓은 범위는 가운데를 기준으로 잘라 Overpass 과부하를 막는다 */
+/** 너무 넓은 범위는 가운데를 기준으로 잘라, 한 요청이 타일을 지나치게 많이 끌지 않게 한다 */
 function clamp(b: BBox): BBox {
   const cLng = (b.minLng + b.maxLng) / 2;
   const cLat = (b.minLat + b.maxLat) / 2;
@@ -250,16 +312,6 @@ function clamp(b: BBox): BBox {
   return out;
 }
 
-const keyOf = (b: BBox) =>
-  [b.minLng, b.minLat, b.maxLng, b.maxLat].map((v) => v.toFixed(4)).join(",");
-
-/**
- * 범위마다 번들 하나. **여러 범위를 Overpass 한 번으로 받는다.**
- *
- * 공개 미러는 붐빌 때 요청 하나에 수십 초씩 걸리고 거절도 잦다. 실제로 재 보면
- * 걸리는 시간이 범위 크기와 거의 상관없다 — 줄 서는 시간이 대부분이다.
- * 그래서 출발지·목적지·환승지를 따로 부르면 그 줄서기가 그대로 쌓인다.
- */
 export async function GET(req: NextRequest) {
   const raws = req.nextUrl.searchParams.getAll("bbox");
   if (!raws.length) return new NextResponse("bbox 파라미터가 필요합니다", { status: 400 });
@@ -271,10 +323,13 @@ export async function GET(req: NextRequest) {
     const n = raw.split(",").map(Number);
     if (n.length !== 4 || n.some((v) => !Number.isFinite(v)))
       return new NextResponse("bbox 형식이 올바르지 않습니다", { status: 400 });
-    boxes.push(snap(clamp({ minLng: n[0], minLat: n[1], maxLng: n[2], maxLat: n[3] })));
+    boxes.push(clamp({ minLng: n[0], minLat: n[1], maxLng: n[2], maxLat: n[3] }));
   }
 
-  const wanted = boxes.map(keyOf).join(";");
+  if (!boxes.some(inSeoul))
+    return new NextResponse("아직 서울 안에서만 길을 찾을 수 있습니다", { status: 422 });
+
+  const wanted = boxes.map((b) => tilesCovering(b).map(tileKey).join(",")).join(";");
   const shared = inflight.get(wanted);
   if (shared) return NextResponse.json({ bundles: await shared });
 
@@ -291,85 +346,26 @@ export async function GET(req: NextRequest) {
 }
 
 async function collect(boxes: BBox[], referer: string): Promise<(OsmBundle | null)[]> {
-  const now = Date.now();
-  const bundles: (OsmBundle | null)[] = boxes.map((b) => {
-    const hit = cache.get(keyOf(b));
-    return hit && now - hit.at < CACHE_TTL_MS ? hit.data : null;
-  });
-
-  // 메모리에 없으면 디스크를 본다 (서버를 다시 띄워도 가 본 동네는 그대로 쓴다)
-  await Promise.all(
-    boxes.map(async (box, i) => {
-      if (bundles[i]) return;
-      const saved = await readCachedBundle(keyOf(box));
-      if (saved) {
-        bundles[i] = saved;
-        cache.set(keyOf(box), { at: now, data: saved });
-      }
-    })
-  );
-
-  // 그래도 없는 범위만 Overpass 에 묻는다. 하나가 실패해도 나머지는 쓴다
-  await Promise.all(
-    boxes.map(async (box, i) => {
-      if (bundles[i]) return;
-      let data: OsmBundle;
-      try {
-        /*
-         * 건물은 브이월드(정부 건물통합정보)에서 받는다 — 훨씬 빠르고 층수까지 있다.
-         * Overpass 에서 건물을 빼면 남은 질의도 그만큼 가벼워지므로, 둘을 동시에 부른다.
-         * 브이월드가 안 되면 그때 Overpass 로 건물까지 다시 받는다.
-         */
-        const useVWorld = hasVWorldBuildings();
-        const [elements, vwBuildings] = await Promise.all([
-          overpass(buildQuery(box, !useVWorld)),
-          useVWorld ? fetchVWorldBuildings(box, referer) : Promise.resolve(null),
-        ]);
-        data = bundleOf(elements, box, woodsOf(elements));
-        if (useVWorld) {
-          if (vwBuildings?.length) data.buildings = vwBuildings;
-          else {
-            console.warn("[osm] 브이월드 건물을 못 받아 OSM 으로 되돌아갑니다");
-            data.buildings = bundleOf(await overpass(buildQuery(box, true)), box, woodsOf(elements)).buildings;
-          }
-        }
-      } catch (err) {
-        console.warn("[osm]", (err as Error).message);
-        /*
-         * 공개 Overpass 는 붐비면 통째로 못 쓰는 때가 있다. 그럴 때 "지도 없음" 으로
-         * 끝내는 대신, 지난번에 받아 둔 것을 (좀 지났더라도) 그대로 쓴다.
-         * 건물과 길이 며칠 사이에 달라지지는 않는다.
-         */
-        const stale = await readCachedBundle(keyOf(box), true);
-        if (stale) {
-          console.warn("[osm] 지난번에 받아 둔 자료로 대신합니다");
-          bundles[i] = stale;
-        }
-        return;
-      }
-
-      // 보행로 좌표마다 고도를 붙인다. DEM 을 못 받으면 그냥 없이 간다
-      const elevation = await loadElevation([box.minLng, box.minLat, box.maxLng, box.maxLat]);
-      if (!elevation)
-        console.warn("[osm] 고도 없이 응답합니다 — 언덕을 넘는 경로가 나올 수 있습니다");
-      else
-        for (const w of data.ways)
-          w.elev = smoothProfile(w.path.map(([lng, lat]) => elevation(lng, lat)));
-
-      bundles[i] = data;
-      // 길도 건물도 없으면 제대로 받은 게 아니다. 12시간 캐시에 남기면 두고두고 잘못 안내한다
-      if (data.ways.length || data.buildings.length) {
-        cache.set(keyOf(box), { at: now, data });
-        void writeCachedBundle(keyOf(box), data);
-      }
-    })
-  );
-
-  while (cache.size > CACHE_MAX) {
-    const oldest = [...cache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
-    if (!oldest) break;
-    cache.delete(oldest[0]);
+  // 여러 범위가 같은 타일을 쓰는 일이 흔하다. 타일 단위로 한 번씩만 갖춘다
+  const need = new Map<string, Tile>();
+  for (const b of boxes) {
+    if (!inSeoul(b)) continue;
+    for (const t of tilesCovering(b)) need.set(tileKey(t), t);
   }
 
-  return bundles;
+  const ready = new Map<string, OsmBundle>();
+  await Promise.all(
+    [...need.values()].map(async (t) => {
+      const data = await loadTile(t, referer);
+      if (data) ready.set(tileKey(t), data);
+    })
+  );
+
+  return boxes.map((b) => {
+    if (!inSeoul(b)) return null;
+    const parts = tilesCovering(b)
+      .map((t) => ready.get(tileKey(t)))
+      .filter((d): d is OsmBundle => !!d);
+    return parts.length ? assemble(b, parts) : null;
+  });
 }

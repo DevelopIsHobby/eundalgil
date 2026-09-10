@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   bboxContains,
   bboxOfPoints,
+  distMeters,
   distToSegment,
   EARTH_M_PER_DEG_LAT,
   mPerDegLon,
@@ -10,6 +11,8 @@ import {
   type BBox,
   type LngLat,
 } from "@/lib/geo";
+import { readRail, writeRail, type RailData } from "@/lib/railStore";
+import { SEOUL } from "@/lib/tiles";
 import { chainPaths, shapePartly } from "@/lib/shape";
 import {
   ACCESS_RADIUS_M,
@@ -37,54 +40,24 @@ const inflight = new Map<string, Promise<TransitData>>();
 /** 정류장을 찾는 반경 상한(m) — 이보다 넓히면 Overpass 응답이 급격히 커진다 */
 const MAX_RADIUS_M = 1200;
 
-function bboxAround(p: LngLat, meters: number) {
-  const dLat = meters / EARTH_M_PER_DEG_LAT;
-  const dLng = meters / mPerDegLon(p[1]);
-  // south,west,north,east
-  return `${(p[1] - dLat).toFixed(6)},${(p[0] - dLng).toFixed(6)},${(p[1] + dLat).toFixed(6)},${(p[0] + dLng).toFixed(6)}`;
-}
-
 /**
- * 정류장으로 볼 수 있는 노드.
- * 버스는 highway=bus_stop, 지하철은 노선 관계가 승강장(platform)보다
- * 정차 지점(stop_position)을 멤버로 두는 경우가 많아 둘 다 넣는다.
- */
-const STOP_SELECTORS = [
-  'node["highway"="bus_stop"]',
-  'node["public_transport"="platform"]',
-  'node["public_transport"="stop_position"]',
-  'node["railway"~"^(station|halt|tram_stop)$"]',
-];
-
-/** 출발·도착을 모두 감싸는 범위 — 타고 가는 구간의 선로·노선 길을 이 안에서만 받는다 */
-function corridorBox(a: LngLat, b: LngLat, meters: number) {
-  return padBBox(bboxOfPoints([a, b]), meters);
-}
-
-/**
- * 출발지·목적지 주변의 정류장을 먼저 찾고, 그 정류장을 지나는 노선 관계만 받아 온다.
- * 노선에 속한 나머지 정류장 좌표는 `node(r)` 재귀로 한 번에 따라온다.
+ * 서울 철도 노선을 **통째로** 받는 질의.
  *
- * 마지막으로 그 노선의 **선로**를 출발·도착 사이 범위에서만 좌표까지 받는다.
- * 지하철이 지하로 가는지 지상으로 가는지는 선로의 tunnel 태그에만 적혀 있고
- * (역 노드에는 없다), 노선 전체를 받으면 응답이 지나치게 커진다.
+ * 예전에는 길찾기 한 번마다 출발·도착 언저리를 물었다. 그런데 노선과 선로는 몇 달에 한 번
+ * 바뀔까 말까 한 자료라, 매번 공개 Overpass 에 줄을 설 이유가 없다. 한 번 받아 파일로 두고
+ * 그 뒤로는 파일만 읽는다.
+ *
+ * 버스는 여기서 받지 않는다 — TOPIS 가 실시간으로 주고, OSM 에는 국내 시내버스가 거의 없다.
+ * 선로 좌표는 서울 범위로 자른다. 1호선처럼 천안까지 뻗은 노선을 통째로 받을 수는 없다.
  */
-function buildQuery(a: LngLat, b: LngLat, radius: number) {
-  const boxA = bboxAround(a, radius);
-  const boxB = bboxAround(b, radius);
-  const near = [...STOP_SELECTORS.map((s) => `${s}(${boxA});`), ...STOP_SELECTORS.map((s) => `${s}(${boxB});`)].join(
-    "\n  "
-  );
-  return `[out:json][timeout:60];
-(
-  ${near}
-)->.s;
-.s out body qt;
-rel(bn.s)["type"="route"]["route"~"^(bus|subway|light_rail|tram|train|monorail|trolleybus)$"]->.r;
+function seoulRailQuery() {
+  const box = toOverpassBBox(SEOUL);
+  return `[out:json][timeout:180];
+rel["type"="route"]["route"~"^(subway|light_rail|tram|train|monorail)$"](${box})->.r;
 .r out body qt;
 node(r.r)->.rn;
 .rn out body qt;
-way(r.r)(${toOverpassBBox(corridorBox(a, b, radius))});
+way(r.r)(${box});
 out geom;`;
 }
 
@@ -192,64 +165,11 @@ function looksOrdered(points: LngLat[]) {
   return far / (points.length - 1) <= 0.12;
 }
 
-export async function GET(req: NextRequest) {
-  const parse = (raw: string | null): LngLat | null => {
-    if (!raw) return null;
-    const [lng, lat] = raw.split(",").map(Number);
-    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
-    return [lng, lat];
-  };
-
-  const a = parse(req.nextUrl.searchParams.get("a"));
-  const b = parse(req.nextUrl.searchParams.get("b"));
-  if (!a || !b) return new NextResponse("a, b 좌표가 필요합니다", { status: 400 });
-
-  const radius = Math.min(MAX_RADIUS_M, Number(req.nextUrl.searchParams.get("r")) || 800);
-  const corridor = corridorBox(a, b, radius);
-
-  const key = [...a, ...b].map((v) => v.toFixed(3)).join(",") + `@${radius}`;
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return NextResponse.json(hit.data);
-
-  const shared = inflight.get(key);
-  if (shared) {
-    try {
-      return NextResponse.json(await shared);
-    } catch (err) {
-      return new NextResponse((err as Error).message, { status: 503 });
-    }
-  }
-
-  const run = build(a, b, radius, corridor, key).finally(() => inflight.delete(key));
-  inflight.set(key, run);
-  try {
-    return NextResponse.json(await run);
-  } catch (err) {
-    return new NextResponse((err as Error).message, { status: 503 });
-  }
-}
-
-async function build(
-  a: LngLat,
-  b: LngLat,
-  radius: number,
-  corridor: BBox,
-  key: string
-): Promise<TransitData> {
-
-  /*
-   * 지하철은 OSM, 버스는 TAGO·TOPIS 에서 온다.
-   * Overpass 가 죽어도 버스 안내는 나가야 하므로 여기서 끝내지 않는다.
-   */
-  let elements: OverpassElement[] = [];
-  let osmError: string | null = null;
-  try {
-    elements = await overpass(buildQuery(a, b, radius));
-  } catch (err) {
-    osmError = (err as Error).message;
-    console.warn("[transit] overpass:", osmError);
-  }
-
+/**
+ * Overpass 응답을 우리 모양(정류장 + 지나는 순서)으로 옮긴다.
+ * 미리받기 때 한 번만 돈다 — 평소에는 그 결과를 파일에서 읽는다.
+ */
+function parseRail(elements: OverpassElement[], box: BBox) {
   const nodes = new Map<number, OverpassElement>();
   const relations: OverpassElement[] = [];
   const tracks = new Map<number, TrackWay>();
@@ -342,7 +262,7 @@ async function build(
     const shaped = shapeOnTracks(
       routeTracks,
       ordered.map((id) => stops.get(id)!.p),
-      corridor
+      box
     );
 
     patterns.push({
@@ -357,6 +277,81 @@ async function build(
       shape: shaped?.shape,
       stopIndex: shaped?.stopIndex,
     });
+  }
+
+  return { stops: [...stops.values()], patterns };
+}
+
+/**
+ * 서울 철도 노선을 갖춰 둔다. 파일에 있으면 그걸 쓰고, 없으면 한 번 받아서 남긴다.
+ * 미리 받아 두면 길찾기 중에 공개 Overpass 를 부를 일이 없다.
+ */
+async function loadRail(): Promise<RailData> {
+  const saved = await readRail();
+  if (saved) return saved;
+
+  const elements = await overpass(seoulRailQuery());
+  const { stops, patterns } = parseRail(elements, SEOUL);
+  if (!patterns.length) throw new Error("철도 노선을 받지 못했습니다");
+  const data: RailData = { stops, patterns, builtAt: Date.now() };
+  await writeRail(data);
+  return data;
+}
+
+export async function GET(req: NextRequest) {
+  const parse = (raw: string | null): LngLat | null => {
+    if (!raw) return null;
+    const [lng, lat] = raw.split(",").map(Number);
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+    return [lng, lat];
+  };
+
+  const a = parse(req.nextUrl.searchParams.get("a"));
+  const b = parse(req.nextUrl.searchParams.get("b"));
+  if (!a || !b) return new NextResponse("a, b 좌표가 필요합니다", { status: 400 });
+
+  const radius = Math.min(MAX_RADIUS_M, Number(req.nextUrl.searchParams.get("r")) || 800);
+
+  const key = [...a, ...b].map((v) => v.toFixed(3)).join(",") + `@${radius}`;
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return NextResponse.json(hit.data);
+
+  const shared = inflight.get(key);
+  if (shared) {
+    try {
+      return NextResponse.json(await shared);
+    } catch (err) {
+      return new NextResponse((err as Error).message, { status: 503 });
+    }
+  }
+
+  const run = build(a, b, radius, key).finally(() => inflight.delete(key));
+  inflight.set(key, run);
+  try {
+    return NextResponse.json(await run);
+  } catch (err) {
+    return new NextResponse((err as Error).message, { status: 503 });
+  }
+}
+
+async function build(
+  a: LngLat,
+  b: LngLat,
+  radius: number,
+  key: string
+): Promise<TransitData> {
+
+  /*
+   * 철도는 미리 받아 둔 파일에서, 버스는 TAGO·TOPIS 에서 온다.
+   * 철도를 못 읽어도 버스 안내는 나가야 하므로 여기서 끝내지 않는다.
+   */
+  let rail: RailData | null = null;
+  let osmError: string | null = null;
+  try {
+    rail = await loadRail();
+  } catch (err) {
+    osmError = (err as Error).message;
+    console.warn("[transit] 철도 노선:", osmError);
   }
 
   /*
@@ -398,13 +393,26 @@ async function build(
   }
   if (!sources.length) busNotice = "버스 정보 키가 없어 지하철만 안내합니다. (.env.local 의 TAGO_KEY)";
 
-  const osmPatterns = busPatterns.length ? patterns.filter((p) => p.mode !== "bus") : patterns;
+  /*
+   * 이 구간에서 탈 수 있는 노선만 남긴다.
+   * 파일에는 서울 철도가 통째로 들어 있는데, 그대로 보내면 응답만 커지고 쓸모는 없다 —
+   * 타려면 출발지나 목적지 어느 한쪽 걸어갈 거리 안에 역이 있어야 한다.
+   * (환승 안도 양쪽 끝 노선을 이어 만들므로 이 조건으로 충분하다)
+   */
+  const railStops = new Map((rail?.stops ?? []).map((s) => [s.id, s]));
+  const reach = radius * 1.25;
+  const railPatterns = (rail?.patterns ?? []).filter((pt) =>
+    pt.stops.some((id) => {
+      const s = railStops.get(id);
+      return !!s && (distMeters(a, s.p) <= reach || distMeters(b, s.p) <= reach);
+    })
+  );
 
   // 실제로 쓰이는 정류장만 남긴다
-  const used = new Set(osmPatterns.flatMap((p) => p.stops));
+  const used = new Set(railPatterns.flatMap((p) => p.stops));
   const data: TransitData = {
-    stops: [...[...stops.values()].filter((s) => used.has(s.id)), ...busStops],
-    patterns: [...osmPatterns, ...busPatterns],
+    stops: [...[...railStops.values()].filter((s) => used.has(s.id)), ...busStops],
+    patterns: [...railPatterns, ...busPatterns],
     notice: busPatterns.length ? undefined : busNotice,
     fetchedAt: Date.now(),
   };

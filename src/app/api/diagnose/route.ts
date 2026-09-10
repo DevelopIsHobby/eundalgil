@@ -4,7 +4,7 @@ import { ShadeIndex, buildShadows } from "@/lib/shadow";
 import { applyShade, buildGraph, findRoutes } from "@/lib/router";
 import { DEFAULT_PREFS, weightsFromPrefs, type Prefs } from "@/lib/prefs";
 import { planTransit, type TransitData } from "@/lib/transit";
-import { cacheStats } from "@/lib/osmCache";
+import { tileStats } from "@/lib/tileStore";
 import { bboxOfPoints, padBBox, distMeters } from "@/lib/geo";
 import type { OsmBundle } from "@/lib/osm";
 import type { LngLat } from "@/lib/geo";
@@ -133,7 +133,7 @@ export async function GET(req: Request) {
     })),
     prefs,
     // 디스크 캐시가 얼마나 쌓였는지 — 느릴 때 캐시 탓인지 Overpass 탓인지 가른다
-    osmCache: await cacheStats(),
+    tiles: await tileStats(),
     transit,
     error: r.error ?? null,
     msec: { fetch: tFetch - t0, shadow: tShadow - tFetch, graph: tGraph - tShadow, route: tRoute - tGraph },
