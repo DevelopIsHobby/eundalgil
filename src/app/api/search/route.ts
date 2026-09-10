@@ -405,6 +405,34 @@ async function photon(q: string, bias: Bias, signal: AbortSignal): Promise<Place
     });
 }
 
+/**
+ * OSM 은 국내 지하철역을 **"역" 을 뗀 이름**으로 적어 둔다.
+ * 상도역은 `상도`, 봉천역은 `봉천`, 숭실대입구역은 `숭실대입구` 다.
+ * 그래서 "상도역" 을 그대로 물으면 지하철역은 하나도 안 나오고 같은 이름의
+ * 버스정류장·따릉이대여소만 잔뜩 나온다. 역 이름은 그 둘에 그대로 들어가 있기 때문이다.
+ *
+ * 그래서 "역" 으로 끝나는 질의는 **"역" 을 뗀 이름으로 한 번 더 묻고**, 그중
+ * 지하철역만 골라 앞에 세운다. 이름은 사람이 부르는 대로 "상도역" 으로 되돌려 적는다.
+ */
+const STATION_STEM_MIN = 2;
+
+async function stationsByStem(q: string, bias: Bias, signal: AbortSignal): Promise<PlaceHit[]> {
+  const stem = q.trim().replace(/역$/, "").trim();
+  if (stem.length < STATION_STEM_MIN) return [];
+  return (await photon(stem, bias, signal)).filter(looksLikeStation);
+}
+
+/**
+ * 역 이름 뒤에 "역" 을 붙여 준다. OSM 은 `상도`·`숭실대입구` 로 적어 두는데, 그대로 두면
+ * 화면에서 동네 이름처럼 보이고 같은 역이 이름만 달라 두 줄로 뜬다.
+ * 이미 "역" 이 들어간 이름(`숭실대입구역(살피재)`)은 건드리지 않는다.
+ */
+function nameStations(hits: PlaceHit[]) {
+  return hits.map((h) =>
+    looksLikeStation(h) && !h.name.includes("역") ? { ...h, name: `${h.name}역` } : h
+  );
+}
+
 /** 지하철역으로 볼 만한 분류인지 — 버스정류장은 뺀다 */
 function looksLikeStation(hit: PlaceHit) {
   const c = `${hit.category ?? ""}`.toLowerCase();
@@ -454,7 +482,10 @@ function preferStations(q: string, hits: PlaceHit[], bias: Bias) {
  *   - Photon   — 상호·부분 입력에 강한 대신 엉뚱한 동네도 물어 온다
  */
 async function search(q: string, bias: Bias, origin: string, signal: AbortSignal): Promise<PlaceHit[]> {
+  const isStation = /역$/.test(q.trim());
   const settled = await Promise.allSettled([
+    // "○○역" 이면 "역" 을 뗀 이름으로 물은 지하철역을 맨 앞에 세운다
+    isStation ? stationsByStem(q, bias, signal) : Promise.resolve<PlaceHit[]>([]),
     vworld(q, origin, signal),
     nominatim(q, bias, signal),
     photon(q, bias, signal),
@@ -464,11 +495,12 @@ async function search(q: string, bias: Bias, origin: string, signal: AbortSignal
     .map((s) => s.value)
     // 키가 없어 건너뛴 출처(null)와 결과가 없는 출처는 순번에서 뺀다
     .filter((v): v is PlaceHit[] => v !== null && v.length > 0);
-  // 전부 죽었을 때만 오류로 본다
-  if (!settled.some((s) => s.status === "fulfilled")) {
+  // 전부 죽었을 때만 오류로 본다 (역 이름 되묻기는 있으나 마나 한 것이므로 세지 않는다)
+  if (!settled.slice(1).some((s) => s.status === "fulfilled")) {
     throw new Error("검색 서버에 연결하지 못했습니다.");
   }
-  return preferStations(q, dedupe(interleave(groups)), bias).slice(0, LIMIT);
+  // 이름을 먼저 맞춰 둬야 같은 역이 `숭실대입구` · `숭실대입구역` 두 줄로 남지 않는다
+  return preferStations(q, dedupe(nameStations(interleave(groups))), bias).slice(0, LIMIT);
 }
 
 export async function GET(req: NextRequest) {
@@ -496,7 +528,7 @@ export async function GET(req: NextRequest) {
         ? undefined
         : hasKoreanDb
           ? `"${roadToken}" 이 들어간 주소를 찾지 못했어요. 도로명을 다시 확인해 주세요.`
-          : "국내 도로명주소·건물명은 OpenStreetMap 에 거의 없습니다. .env.local 에 브이월드 키(VWORLD_KEY)를 넣으면 찾을 수 있어요.";
+          : "국내 도로명주소·건물명은 OpenStreetMap 에 거의 없습니다. 환경 변수에 브이월드 키(VWORLD_KEY)를 넣으면 찾을 수 있어요.";
     return NextResponse.json({ hits: shown, notice });
   };
 
